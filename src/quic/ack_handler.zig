@@ -39,7 +39,11 @@ const MAX_ACK_RESULT: usize = 256;
 
 /// Maximum number of stream frame records per sent packet.
 /// Must be large enough to track all stream frames in a packet (e.g., many small 0-RTT streams).
-pub const MAX_STREAM_FRAMES_PER_PACKET: usize = 48;
+// Cap inline stream-frame records per sent packet. Each is 32 bytes and lives
+// inside SentPacket (one per in-flight packet). A 1200-byte MTU can't fit many
+// usefully-sized stream frames anyway — 12 is generous for real traffic and
+// keeps SentPacket at ~432 bytes instead of ~1.6KB.
+pub const MAX_STREAM_FRAMES_PER_PACKET: usize = 12;
 
 /// Tracks which stream data was carried in a sent packet for retransmission on loss.
 pub const StreamFrameInfo = struct {
@@ -943,3 +947,4 @@ test "NewReno: app_limited suppresses cwnd growth" {
     cc.onPacketAcked(1200, 300);
     try testing.expect(cc.congestion_window > after_ack);
 }
+

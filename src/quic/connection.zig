@@ -1099,7 +1099,7 @@ pub const Connection = struct {
                     return error.ProtocolViolation;
                 }
                 if (frame.isAckEliciting()) ack_eliciting = true;
-                try self.processFrame(frame, .application, now);
+                try self.processFrame(&frame, .application, now);
                 const consumed = self.frameSize(frame, remaining);
                 if (consumed == 0) break;
                 remaining = remaining[consumed..];
@@ -1285,7 +1285,7 @@ pub const Connection = struct {
                 qlog_frame_count += 1;
             }
 
-            try self.processFrame(frame, epoch, now);
+            try self.processFrame(&frame, epoch, now);
 
             // Advance past this frame. For frames that contain data slices,
             // figure out where they end in the buffer.
@@ -1382,8 +1382,8 @@ pub const Connection = struct {
     }
 
     /// Process a single frame.
-    pub fn processFrame(self: *Connection, frame: Frame, epoch: packet.Epoch, now: i64) !void {
-        switch (frame) {
+    pub fn processFrame(self: *Connection, frame: *const Frame, epoch: packet.Epoch, now: i64) !void {
+        switch (frame.*) {
             .padding => {},
             .ping => {},
 
