@@ -158,7 +158,11 @@ const EVT_WT_DATAGRAM = 0x09;
 const EVT_WT_SESSION_CLOSED = 0x0a;
 
 function pollEvents(wasm, handlers) {
-  const BUF = 1024;
+  // Must match MAX_EVENT_SIZE in wasm_api.zig — currently 1039 to fit a
+  // session_closed event with a max-size 1024-byte reason. popEvent returns
+  // 0 when the caller's buffer is smaller than the event, which would
+  // silently drop the event and stall the poll loop.
+  const BUF = 1039;
   const ptr = wasm.qz_alloc(BUF);
 
   while (true) {
@@ -227,9 +231,19 @@ function pollEvents(wasm, handlers) {
 
       // ── WT session closed by peer ──
       case EVT_WT_SESSION_CLOSED: {
-        const sessionId = view.getBigUint64(1);
-        const errorCode = view.getUint32(9);
-        handlers.onSessionClosed?.(sessionId, errorCode);
+        // Use false for big-endian to match Zig's .big
+        const sessionId = view.getBigUint64(1, false);
+        const errorCode = view.getUint32(9, false);
+        // Read the 2-byte length of the reason sequence
+        const reasonLen = view.getUint16(13, false);
+        // Slice the byte sequence and decode it
+        const reasonBytes = new Uint8Array(
+          view.buffer,
+          view.byteOffset + 15,
+          reasonLen,
+        );
+        const reason = new TextDecoder().decode(reasonBytes);
+        handlers.onSessionClosed?.(sessionId, errorCode, reason);
         break;
       }
     }
@@ -391,8 +405,8 @@ async function main() {
       wasm.qz_free(ptr, BUF);
     },
 
-    onSessionClosed(sessionId, errorCode) {
-      console.log(`WT session ${sessionId} closed, code=${errorCode}`);
+    onSessionClosed(sessionId, errorCode, reason) {
+      console.log(`WT session ${sessionId} closed, code=${errorCode}, reason=${reason}`);
     },
 
     onClosed() {
