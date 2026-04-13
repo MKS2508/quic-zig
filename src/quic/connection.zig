@@ -1777,7 +1777,11 @@ pub const Connection = struct {
                     if (s.fin and (strm.send.fin_sent or strm.send.reset_err != null) and !strm.closed_for_gc) {
                         strm.closed_for_gc = true;
                         self.streams.closeStream(s.stream_id);
-                        if (strm.send.retransmit_count == 0) {
+                        // Only dispose once all our send data has been ACKed. fin_sent
+                        // means we wrote the FIN once, not that the peer received it —
+                        // PTO may need to retransmit everything under loss, and can't
+                        // if the stream is removed from the map.
+                        if (strm.send.retransmit_count == 0 and !strm.send.hasUnackedData()) {
                             self.streams.queueDisposal(s.stream_id);
                         }
                     }

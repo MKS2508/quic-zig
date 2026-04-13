@@ -850,7 +850,12 @@ pub const StreamsMap = struct {
         var it = self.streams.valueIterator();
         while (it.next()) |sp| {
             const s = sp.*;
-            if (!s.send.hasData() or (s.closed_for_gc and s.send.retransmit_count == 0)) continue;
+            // closed_for_gc signals "FIN sent + peer FIN received", but FIN-sent
+            // does not imply FIN-acked. Under loss, PTO resets send_offset to
+            // ack_offset to retransmit unACKed data — making hasData() true even
+            // though retransmit_count stays 0. So the hasData() check is the
+            // authoritative signal; closed_for_gc alone must not suppress it.
+            if (!s.send.hasData()) continue;
             if (s.send.send_order != null) {
                 if (ordered_count >= MAX_SCHEDULABLE) continue;
                 out[ordered_count] = s;
@@ -870,7 +875,8 @@ pub const StreamsMap = struct {
         var it2 = self.streams.valueIterator();
         while (it2.next()) |sp| {
             const s = sp.*;
-            if (!s.send.hasData() or (s.closed_for_gc and s.send.retransmit_count == 0)) continue;
+            // See tier 1: hasData() is authoritative, closed_for_gc alone can't suppress.
+            if (!s.send.hasData()) continue;
             if (s.send.send_order != null) continue; // already in tier 1
 
             if (s.send.urgency < min_urgency) {
