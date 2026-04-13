@@ -502,6 +502,7 @@ pub fn parseQuicHeader(fbs: anytype, short_dcid_len: u8) !Header {
             std.log.err("Destination CID is too long ({any} bytes)", .{dcid_length});
             return error.PacketError;
         }
+        if (fbs.pos + dcid_length > fbs.buffer.len) return error.BufferTooShort;
 
         header.dcid = fbs.buffer[fbs.pos..(fbs.pos + dcid_length)];
 
@@ -513,6 +514,7 @@ pub fn parseQuicHeader(fbs: anytype, short_dcid_len: u8) !Header {
             std.log.err("Source CID is too long ({any} bytes)", .{scid_length});
             return error.InvalidPacket;
         }
+        if (fbs.pos + scid_length > fbs.buffer.len) return error.BufferTooShort;
 
         header.scid = fbs.buffer[fbs.pos..(fbs.pos + scid_length)];
 
