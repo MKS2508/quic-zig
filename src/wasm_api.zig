@@ -70,8 +70,12 @@ const allocator = std.heap.wasm_allocator;
 
 // ── Instance state ────────────────────────────────────────────────────
 
+// Largest event is EVT_WT_SESSION_CLOSED:
+// type(1) + session_id(8) + error_code(4) + reason_len(2) + reason(≤1024) = 1039.
+pub const MAX_EVENT_SIZE = 1039;
+
 const EventEntry = struct {
-    data: [1024]u8 = undefined,
+    data: [MAX_EVENT_SIZE]u8 = undefined,
     len: u16 = 0,
 };
 
@@ -110,7 +114,7 @@ const Instance = struct {
     fn pushEvent(self: *Instance, data: []const u8) void {
         if (self.event_count >= MAX_EVENTS) return;
         const idx = self.event_tail;
-        const copy_len = @min(data.len, 1024);
+        const copy_len = @min(data.len, MAX_EVENT_SIZE);
         @memcpy(self.events[idx].data[0..copy_len], data[0..copy_len]);
         self.events[idx].len = @intCast(copy_len);
         self.event_tail = (self.event_tail + 1) % MAX_EVENTS;
@@ -427,21 +431,16 @@ export fn qz_poll_event(buf_ptr: [*]u8, buf_len: u32) u32 {
                     Instance.stashPending(&inst.pending_dgram, dg.session_id, dg.data);
                 },
                 .session_closed => |sc| {
-                    // WebTransport spec limits 'reason' to 1024 bytes.
-                    // Total max size: 1 (Type) + 8 (SessionID) + 4 (ErrorCode) 
-                    // + 2 (ReasonLen) + 1024 (Bytes) = 1039 bytes.
-                    const max_reason_len = @min(sc.reason.len, 1024);
-                    const total_size = 1 + 8 + 4 + 2 + max_reason_len;
-                    var evt_buf: [1039]u8 = undefined;
+                    // WebTransport spec caps 'reason' at 1024 bytes; session.zig already
+                    // truncates at that bound, so @min is defense-in-depth.
+                    const reason_len = @min(sc.reason.len, 1024);
+                    var evt_buf: [MAX_EVENT_SIZE]u8 = undefined;
                     evt_buf[0] = EVT_WT_SESSION_CLOSED;
                     std.mem.writeInt(u64, evt_buf[1..9], sc.session_id, .big);
                     std.mem.writeInt(u32, evt_buf[9..13], sc.error_code, .big);
-                    // Write 2-byte length for the reason byte sequence
-                    std.mem.writeInt(u16, evt_buf[13..15], @as(u16, @intCast(max_reason_len)), .big);
-                    // Copy the raw byte sequence
-                    @memcpy(evt_buf[15 .. 15 + max_reason_len], sc.reason[0..max_reason_len]);
-                    // Push the exactly sized slice
-                    inst.pushEvent(evt_buf[0..total_size]);
+                    std.mem.writeInt(u16, evt_buf[13..15], @intCast(reason_len), .big);
+                    @memcpy(evt_buf[15 .. 15 + reason_len], sc.reason[0..reason_len]);
+                    inst.pushEvent(evt_buf[0 .. 15 + reason_len]);
                 },
                 else => {},
             }

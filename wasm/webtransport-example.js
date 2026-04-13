@@ -158,7 +158,11 @@ const EVT_WT_DATAGRAM = 0x09;
 const EVT_WT_SESSION_CLOSED = 0x0a;
 
 function pollEvents(wasm, handlers) {
-  const BUF = 1024;
+  // Must match MAX_EVENT_SIZE in wasm_api.zig — currently 1039 to fit a
+  // session_closed event with a max-size 1024-byte reason. popEvent returns
+  // 0 when the caller's buffer is smaller than the event, which would
+  // silently drop the event and stall the poll loop.
+  const BUF = 1039;
   const ptr = wasm.qz_alloc(BUF);
 
   while (true) {
@@ -240,6 +244,7 @@ function pollEvents(wasm, handlers) {
         );
         const reason = new TextDecoder().decode(reasonBytes);
         handlers.onSessionClosed?.(sessionId, errorCode, reason);
+        break;
       }
     }
   }
