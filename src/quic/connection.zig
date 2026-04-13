@@ -1397,7 +1397,8 @@ pub const Connection = struct {
                 // making it appear app-limited even when the sender filled cwnd.
                 self.cc.app_limited = self.pkt_handler.bytes_in_flight < self.cc.sendWindow();
 
-                const result = try self.pkt_handler.onAckReceived(
+                var ack_result: ack_handler.AckResult = .{};
+                try self.pkt_handler.onAckReceived(
                     enc_level,
                     ack.largest_ack,
                     ack.ack_delay,
@@ -1405,7 +1406,9 @@ pub const Connection = struct {
                     ack.ack_ranges[0..ack.ack_range_count],
                     ack.first_ack_range,
                     now,
+                    &ack_result,
                 );
+                const result = &ack_result;
 
                 // Notify congestion controller, track key update ACKs, and PMTUD
                 var has_non_probe_loss = false;
@@ -1523,7 +1526,8 @@ pub const Connection = struct {
                 // RFC 9002 §7.8: snapshot app_limited BEFORE processing ACKs
                 self.cc.app_limited = self.pkt_handler.bytes_in_flight < self.cc.sendWindow();
 
-                const result = try self.pkt_handler.onAckReceived(
+                var ack_result: ack_handler.AckResult = .{};
+                try self.pkt_handler.onAckReceived(
                     enc_level,
                     ack.largest_ack,
                     ack.ack_delay,
@@ -1531,7 +1535,9 @@ pub const Connection = struct {
                     ack.ack_ranges[0..ack.ack_range_count],
                     ack.first_ack_range,
                     now,
+                    &ack_result,
                 );
+                const result = &ack_result;
 
                 // Notify congestion controller, track key update ACKs, and PMTUD
                 var has_non_probe_loss = false;
@@ -3196,7 +3202,8 @@ pub const Connection = struct {
         // Loss detection timer: check loss_time BEFORE PTO (RFC 9002 §6.2.1).
         // Loss timers don't increment pto_count — they run loss detection directly.
         if (self.pkt_handler.getExpiredLossTime(now)) |loss_level| {
-            const loss_result = self.pkt_handler.detectLossesForSpace(loss_level, now);
+            var loss_result: ack_handler.AckResult = .{};
+            self.pkt_handler.detectLossesForSpace(loss_level, now, &loss_result);
             var has_non_probe_loss_lt = false;
             var earliest_lost_sent_time_lt: ?i64 = null;
             for (loss_result.lost.constSlice()) |pkt| {

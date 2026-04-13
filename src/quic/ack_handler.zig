@@ -177,8 +177,9 @@ pub const SentPacketTracker = struct {
         first_ack_range: u64,
         rtt_stats: *RttStats,
         now: i64,
-    ) !AckResult {
-        var result = AckResult{};
+        result: *AckResult,
+    ) !void {
+        result.* = .{};
 
         if (self.largest_acked == null or largest_ack > self.largest_acked.?) {
             self.largest_acked = largest_ack;
@@ -222,9 +223,7 @@ pub const SentPacketTracker = struct {
         }
 
         // Detect lost packets
-        self.detectLostPackets(rtt_stats, now, &result);
-
-        return result;
+        self.detectLostPackets(rtt_stats, now, result);
     }
 
     fn detectLostPackets(self: *SentPacketTracker, rtt_stats: *RttStats, now: i64, result: *AckResult) void {
@@ -555,19 +554,21 @@ pub const PacketHandler = struct {
         ack_ranges: []const AckRange,
         first_ack_range: u64,
         now: i64,
-    ) !AckResult {
+        result: *AckResult,
+    ) !void {
         const idx = @intFromEnum(level);
 
         const ack_delay_us = ack_delay_encoded << ack_delay_exponent;
         const ack_delay_ns: i64 = @intCast(ack_delay_us * 1000);
 
-        const result = try self.sent[idx].onAckReceived(
+        try self.sent[idx].onAckReceived(
             largest_ack,
             ack_delay_ns,
             ack_ranges,
             first_ack_range,
             &self.rtt_stats,
             now,
+            result,
         );
 
         // ACK-of-ACK pruning (RFC 9000 §13.2.4): when an acked packet contained
@@ -595,8 +596,6 @@ pub const PacketHandler = struct {
 
         self.pto_count = 0;
         self.sent[idx].pto_count = 0;
-
-        return result;
     }
 
     pub fn getAckFrame(self: *PacketHandler, level: EncLevel, now: i64, ack_delay_exponent: u64) ?Frame {
@@ -692,16 +691,15 @@ pub const PacketHandler = struct {
 
     /// Run loss detection for a specific packet number space (called when loss_time fires).
     /// Returns the lost packets for congestion control processing.
-    pub fn detectLossesForSpace(self: *PacketHandler, level: EncLevel, now: i64) AckResult {
+    pub fn detectLossesForSpace(self: *PacketHandler, level: EncLevel, now: i64, result: *AckResult) void {
         const idx = @intFromEnum(level);
-        var result = AckResult{};
-        self.sent[idx].detectLostPackets(&self.rtt_stats, now, &result);
+        result.* = .{};
+        self.sent[idx].detectLostPackets(&self.rtt_stats, now, result);
         for (result.lost.constSlice()) |pkt| {
             if (pkt.in_flight) {
                 self.bytes_in_flight -|= pkt.size;
             }
         }
-        return result;
     }
 
     /// Get the encryption level where PTO should fire (the one with earliest timeout).
@@ -759,7 +757,8 @@ test "SentPacketTracker: basic send and ack" {
     try testing.expectEqual(@as(u32, 1), tracker.ack_eliciting_in_flight);
 
     const ack_time = now + 50_000_000;
-    const result = try tracker.onAckReceived(0, 0, &.{}, 0, &rtt_stats, ack_time);
+    var result: AckResult = .{};
+    try tracker.onAckReceived(0, 0, &.{}, 0, &rtt_stats, ack_time, &result);
 
     try testing.expectEqual(@as(usize, 1), result.acked.len);
     try testing.expectEqual(@as(u64, 0), result.acked.constSlice()[0].pn);
@@ -800,9 +799,9 @@ test "PacketHandler: integration" {
     try handler.onPacketReceived(.initial, 0, true, now, 0);
 
     const ack_time = now + 50_000_000;
-    const result = try handler.onAckReceived(.initial, 0, 0, 3, &.{}, 0, ack_time);
+    var result: AckResult = .{};
+    try handler.onAckReceived(.initial, 0, 0, 3, &.{}, 0, ack_time, &result);
 
-    _ = result;
     try testing.expectEqual(@as(u64, 0), handler.bytes_in_flight);
 }
 
