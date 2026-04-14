@@ -261,5 +261,20 @@ pub fn build(b: *std.Build) void {
             .dest_dir = .{ .override = .{ .custom = "../wasm" } },
         });
         b.step("wasm", "Build WASM QUIC state machine").dependOn(&wasm_install.step);
+
+        const wasm_obj = b.addObject(.{
+            .name = "quic",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/wasm_api.zig"),
+                .target = wasm_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{.{ .name = "quic_core", .module = wasm_core_mod }},
+            }),
+        });
+        const wasm_obj_install = b.addInstallFile(
+            wasm_obj.getEmittedBin(),
+            "wasm/quic.o",
+        );
+        b.step("wasm-obj", "Build WASM QUIC object file (.o)").dependOn(&wasm_obj_install.step);
     }
 }
