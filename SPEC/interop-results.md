@@ -13,7 +13,9 @@ Following Cloudflare's "Accelerating UDP packet transmission for QUIC" post.
 |---------|---------|---------|--------|
 | `sendmmsg` batching | on (Linux) | `QUIC_ZIG_NO_SENDMMSG=1` disables | shipped — no regressions |
 | UDP GSO (`UDP_SEGMENT`) | **off (opt-in)** | `QUIC_ZIG_ENABLE_GSO=1` enables | experimental — see note below |
+| SO_TXTIME kernel pacing | **off (opt-in)** | `QUIC_ZIG_ENABLE_TXTIME=1` enables | shipped — no-op on non-`fq` egress |
 | User-space pacer | on | `QUIC_ZIG_NO_PACING=1` disables | unchanged default, kill switch added |
+| Pacer clock | always `CLOCK_MONOTONIC` | n/a | migrated for SO_TXTIME compat (Plan 4a) |
 
 ### Matrix (sequential run, `handshake,transfer,chacha20,multiplexing,longrtt,http3,keyupdate`)
 

@@ -28,6 +28,25 @@ const UDP_SEGMENT: i32 = 103;
 /// hold a whole run.
 const UDP_MAX_SEGMENTS: usize = 64;
 
+/// Linux SO_TXTIME / SCM_TXTIME — kernel-scheduled packet transmission.
+/// Payload is a u64 CLOCK_MONOTONIC nanosecond timestamp.
+const SOL_SOCKET_LEVEL: i32 = 1;
+const SO_TXTIME: i32 = 61;
+const SCM_TXTIME: i32 = 61;
+const CLOCK_MONOTONIC_ID: i32 = 1;
+
+/// `sock_txtime` passed to setsockopt(SO_TXTIME).
+const SockTxtime = extern struct {
+    clockid: i32,
+    flags: u32,
+};
+
+/// Runtime opt-in for SO_TXTIME kernel pacing. Requires a Linux kernel with
+/// SO_TXTIME (≥4.19) and an fq qdisc on the egress interface for the kernel
+/// to actually honor timestamps. On non-fq paths setsockopt succeeds but the
+/// timestamps are ignored — same behavior as today.
+const txtime_env_var = "QUIC_ZIG_ENABLE_TXTIME";
+
 // Platform-specific constants for ECN socket options (IPv4).
 const IPPROTO_IP: u32 = 0;
 
@@ -90,6 +109,13 @@ const CMSG_BUF_SIZE = CMSG_SPACE * 2; // room for at least 2 cmsgs
 
 /// Per-entry cmsg buffer for UDP_SEGMENT (u16 gso_size payload).
 const CMSG_SPACE_U16 = (CMSG_HDR_SIZE + 2 + @alignOf(CmsgHdr) - 1) & ~@as(usize, @alignOf(CmsgHdr) - 1);
+
+/// Per-entry cmsg buffer for SCM_TXTIME (u64 ns timestamp).
+const CMSG_SPACE_U64 = (CMSG_HDR_SIZE + 8 + @alignOf(CmsgHdr) - 1) & ~@as(usize, @alignOf(CmsgHdr) - 1);
+
+/// Combined buffer when both UDP_SEGMENT and SCM_TXTIME apply to an entry.
+/// Layout: [UDP_SEGMENT cmsg][SCM_TXTIME cmsg]
+const CMSG_SPACE_COMBINED = CMSG_SPACE_U16 + CMSG_SPACE_U64;
 
 /// Raw setsockopt that doesn't panic on EINVAL (needed for trying IPv6 opts on IPv4 sockets).
 fn rawSetsockopt(sockfd: posix.socket_t, level: i32, optname: u32, optval: []const u8) void {
@@ -252,12 +278,19 @@ pub const SendBatch = struct {
     /// Implies use_mmsg; ignored when use_mmsg is false.
     use_gso: bool = false,
 
+    /// Whether SO_TXTIME kernel pacing is available and enabled.
+    /// Implies use_mmsg; ignored when use_mmsg is false.
+    use_txtime: bool = false,
+
     // Per-packet data
     addrs: [MAX_BATCH]posix.sockaddr.storage = undefined,
     addr_lens: [MAX_BATCH]posix.socklen_t = undefined,
     offsets: [MAX_BATCH]u32 = undefined, // offset into data_buf
     lengths: [MAX_BATCH]u32 = undefined, // length of each packet
     ecn_marks: [MAX_BATCH]u2 = undefined,
+    /// Kernel target transmission time per packet (CLOCK_MONOTONIC ns).
+    /// Zero means "send now" (no SCM_TXTIME cmsg attached).
+    txtimes: [MAX_BATCH]u64 = undefined,
 
     // Contiguous buffer holding all packet data
     data_buf: [MAX_BATCH * 1500]u8 = undefined,
@@ -267,15 +300,34 @@ pub const SendBatch = struct {
         const mmsg_on = use_sendmmsg and !envFlagSet(sendmmsg_env_var);
         // GSO is opt-in: only enabled when QUIC_ZIG_ENABLE_GSO=1 is set.
         const gso_on = mmsg_on and envFlagSet(gso_env_var) and probeGsoSupport(sockfd);
+        // SO_TXTIME is opt-in: requires QUIC_ZIG_ENABLE_TXTIME=1 and kernel support.
+        const txtime_on = mmsg_on and envFlagSet(txtime_env_var) and probeTxtimeSupport(sockfd);
         return .{
             .sockfd = sockfd,
             .use_mmsg = mmsg_on,
             .use_gso = gso_on,
+            .use_txtime = txtime_on,
         };
     }
 
-    /// Add a packet to the batch. Flushes automatically when full.
+    /// Add a packet to the batch — sends as soon as the kernel will accept it.
+    /// Auto-flushes when full.
     pub fn add(self: *SendBatch, data: []const u8, addr: *const posix.sockaddr, addr_len: posix.socklen_t, ecn: u2) void {
+        self.addTxtime(data, addr, addr_len, ecn, 0);
+    }
+
+    /// Add a packet with a CLOCK_MONOTONIC target transmission time. The
+    /// kernel releases the packet at `txtime_ns` if SO_TXTIME is honored on
+    /// the egress qdisc; otherwise behaves like `add`. Pass 0 to opt out
+    /// per-packet without disabling TXTIME for the whole socket.
+    pub fn addTxtime(
+        self: *SendBatch,
+        data: []const u8,
+        addr: *const posix.sockaddr,
+        addr_len: posix.socklen_t,
+        ecn: u2,
+        txtime_ns: u64,
+    ) void {
         if (self.count >= MAX_BATCH or self.data_len + data.len > self.data_buf.len) {
             self.flush();
         }
@@ -287,6 +339,7 @@ pub const SendBatch = struct {
         self.addrs[idx] = @as(*const posix.sockaddr.storage, @ptrCast(@alignCast(addr))).*;
         self.addr_lens[idx] = addr_len;
         self.ecn_marks[idx] = ecn;
+        self.txtimes[idx] = txtime_ns;
         self.count += 1;
     }
 
@@ -335,17 +388,19 @@ pub const SendBatch = struct {
     /// each run is further sub-grouped into GSO super-buffers (same peer, same
     /// packet size except possibly the last segment, contiguous in data_buf);
     /// each sub-group becomes one mmsghdr entry carrying a single iovec over
-    /// the concatenated segments and a per-entry UDP_SEGMENT cmsg. Solo groups
-    /// emit without a cmsg (equivalent to the sendmmsg-only path).
+    /// the concatenated segments and a per-entry UDP_SEGMENT cmsg. When TXTIME
+    /// is enabled and a packet has a non-zero target timestamp, an SCM_TXTIME
+    /// cmsg is stacked alongside; per-packet timestamps within a GSO group must
+    /// match (one timestamp applies to the whole super-buffer).
     fn flushLinux(self: *SendBatch) void {
         if (comptime !use_sendmmsg) unreachable;
 
         // Scratch arrays live on the stack — sized for MAX_BATCH.
         var iovs: [MAX_BATCH]posix.iovec_const = undefined;
         var msgvec: [MAX_BATCH]linux.mmsghdr_const = undefined;
-        // One cmsg slot per potential mmsghdr entry. Unused when GSO is off or
-        // when an entry carries a single packet.
-        var cmsg_bufs: [MAX_BATCH][CMSG_SPACE_U16]u8 align(@alignOf(CmsgHdr)) = undefined;
+        // Per-entry cmsg buffer sized to fit UDP_SEGMENT + SCM_TXTIME stacked.
+        // Unused when both GSO and TXTIME are off and the entry carries one packet.
+        var cmsg_bufs: [MAX_BATCH][CMSG_SPACE_COMBINED]u8 align(@alignOf(CmsgHdr)) = undefined;
         // Segment count per mmsghdr entry — used to translate entry-level drops
         // reported by the kernel back into packet counts.
         var seg_counts: [MAX_BATCH]u32 = undefined;
@@ -383,7 +438,9 @@ pub const SendBatch = struct {
     /// Return the exclusive end of the maximal GSO group starting at `g0`
     /// within ECN-run `[g0..end)`. Members must share peer address, be
     /// contiguous in data_buf, and have identical size (only the last may be
-    /// shorter). Capped at UDP_MAX_SEGMENTS.
+    /// shorter). When TXTIME is active they must also share the same target
+    /// timestamp, since one cmsg applies to the whole super-buffer. Capped at
+    /// UDP_MAX_SEGMENTS.
     fn findGsoGroupEnd(self: *const SendBatch, g0: usize, end: usize) usize {
         const gso_size = self.lengths[g0];
         const cap = @min(end, g0 + UDP_MAX_SEGMENTS);
@@ -396,12 +453,14 @@ pub const SendBatch = struct {
             if (self.addr_lens[g1] != self.addr_lens[g0]) break;
             if (self.offsets[g1] != self.offsets[g1 - 1] + self.lengths[g1 - 1]) break;
             if (self.lengths[g1] > gso_size) break;
+            if (self.use_txtime and self.txtimes[g1] != self.txtimes[g0]) break;
         }
         return g1;
     }
 
-    /// Populate one mmsghdr slot covering packets `[g0..g1)`. A single packet
-    /// emits without a cmsg; a multi-packet group emits with UDP_SEGMENT.
+    /// Populate one mmsghdr slot covering packets `[g0..g1)`. Stacks
+    /// UDP_SEGMENT (when the group has more than one segment) and SCM_TXTIME
+    /// (when TXTIME is active and the group's target timestamp is non-zero).
     fn fillEntry(
         self: *SendBatch,
         entry_idx: u32,
@@ -409,7 +468,7 @@ pub const SendBatch = struct {
         g1: usize,
         iovs: *[MAX_BATCH]posix.iovec_const,
         msgvec: *[MAX_BATCH]linux.mmsghdr_const,
-        cmsg_bufs: *[MAX_BATCH][CMSG_SPACE_U16]u8,
+        cmsg_bufs: *[MAX_BATCH][CMSG_SPACE_COMBINED]u8,
     ) void {
         const first_off = self.offsets[g0];
         const last_end = self.offsets[g1 - 1] + self.lengths[g1 - 1];
@@ -420,12 +479,23 @@ pub const SendBatch = struct {
             .len = total_bytes,
         };
 
+        // Compose cmsgs into the per-entry buffer, in fixed order:
+        // UDP_SEGMENT first (offset 0), then SCM_TXTIME (offset CMSG_SPACE_U16).
         var control_ptr: ?*const anyopaque = null;
         var control_len: usize = 0;
+        // Each entry slot is CMSG_SPACE_COMBINED bytes; the outer array's
+        // alignment guarantees the start of every slot is CmsgHdr-aligned
+        // because CMSG_SPACE_COMBINED is a multiple of @alignOf(CmsgHdr).
+        const buf_ptr: [*]align(@alignOf(CmsgHdr)) u8 = @ptrCast(@alignCast(&cmsg_bufs[entry_idx]));
         if (g1 - g0 > 1) {
-            writeUdpSegmentCmsg(&cmsg_bufs[entry_idx], @intCast(self.lengths[g0]));
-            control_ptr = @ptrCast(&cmsg_bufs[entry_idx]);
+            writeUdpSegmentCmsg(buf_ptr, @intCast(self.lengths[g0]));
+            control_ptr = @ptrCast(buf_ptr);
             control_len = CMSG_SPACE_U16;
+        }
+        if (self.use_txtime and self.txtimes[g0] != 0) {
+            writeTxtimeCmsg(@alignCast(buf_ptr + control_len), self.txtimes[g0]);
+            if (control_ptr == null) control_ptr = @ptrCast(buf_ptr);
+            control_len += CMSG_SPACE_U64;
         }
 
         msgvec[entry_idx] = .{
@@ -499,12 +569,21 @@ fn sameSockaddr(a: *const posix.sockaddr.storage, b: *const posix.sockaddr.stora
 }
 
 /// Encode a UDP_SEGMENT cmsg (u16 gso_size) into the caller-provided buffer.
-fn writeUdpSegmentCmsg(buf: *[CMSG_SPACE_U16]u8, gso_size: u16) void {
+fn writeUdpSegmentCmsg(buf: [*]align(@alignOf(CmsgHdr)) u8, gso_size: u16) void {
     const hdr: *CmsgHdr = @ptrCast(@alignCast(buf));
     hdr.cmsg_len = CMSG_HDR_SIZE + @sizeOf(u16);
     hdr.cmsg_level = SOL_UDP;
     hdr.cmsg_type = UDP_SEGMENT;
     std.mem.writeInt(u16, buf[CMSG_HDR_SIZE..][0..@sizeOf(u16)], gso_size, builtin.cpu.arch.endian());
+}
+
+/// Encode a SCM_TXTIME cmsg (u64 ns timestamp) into the caller-provided buffer.
+fn writeTxtimeCmsg(buf: [*]align(@alignOf(CmsgHdr)) u8, txtime_ns: u64) void {
+    const hdr: *CmsgHdr = @ptrCast(@alignCast(buf));
+    hdr.cmsg_len = CMSG_HDR_SIZE + @sizeOf(u64);
+    hdr.cmsg_level = SOL_SOCKET_LEVEL;
+    hdr.cmsg_type = SCM_TXTIME;
+    std.mem.writeInt(u64, buf[CMSG_HDR_SIZE..][0..@sizeOf(u64)], txtime_ns, builtin.cpu.arch.endian());
 }
 
 /// Treats an env var as a boolean flag: unset, empty, or "0" → false; anything else → true.
@@ -526,6 +605,23 @@ fn probeGsoSupport(sockfd: posix.socket_t) bool {
         UDP_SEGMENT,
         std.mem.asBytes(&zero).ptr,
         @sizeOf(u16),
+    );
+    return rc == 0;
+}
+
+/// Enable SO_TXTIME on `sockfd` and return whether the kernel accepted it.
+/// On non-fq egress paths the kernel still accepts the sockopt but ignores
+/// per-packet timestamps — same observable behavior as no-TXTIME, no error
+/// path needed in flush(). Older kernels (<4.19) return ENOPROTOOPT.
+fn probeTxtimeSupport(sockfd: posix.socket_t) bool {
+    if (comptime !use_sendmmsg) return false;
+    const cfg: SockTxtime = .{ .clockid = CLOCK_MONOTONIC_ID, .flags = 0 };
+    const rc = std.c.setsockopt(
+        sockfd,
+        SOL_SOCKET_LEVEL,
+        SO_TXTIME,
+        std.mem.asBytes(&cfg).ptr,
+        @sizeOf(SockTxtime),
     );
     return rc == 0;
 }

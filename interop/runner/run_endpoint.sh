@@ -4,11 +4,13 @@ set -e
 # Setup routing for the simulated network
 source /setup.sh
 
-# Optimization toggles — sendmmsg + pacing are on by default; GSO is opt-in
-# (set QUIC_ZIG_ENABLE_GSO=1 to turn on). Kill switches let us disable the
-# defaults for bisection without rebuilding.
+# Optimization toggles — sendmmsg + pacing are on by default; GSO and TXTIME
+# are opt-in (set QUIC_ZIG_ENABLE_GSO=1 / QUIC_ZIG_ENABLE_TXTIME=1 to turn
+# on). Kill switches let us disable the defaults for bisection without
+# rebuilding.
 export QUIC_ZIG_NO_SENDMMSG="${QUIC_ZIG_NO_SENDMMSG:-0}"
 export QUIC_ZIG_ENABLE_GSO="${QUIC_ZIG_ENABLE_GSO:-0}"
+export QUIC_ZIG_ENABLE_TXTIME="${QUIC_ZIG_ENABLE_TXTIME:-0}"
 export QUIC_ZIG_NO_PACING="${QUIC_ZIG_NO_PACING:-0}"
 
 # Determine if this is a WebTransport test case
