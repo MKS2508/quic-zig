@@ -550,12 +550,11 @@ pub fn Server(comptime Handler: type) type {
                             &batch.current_ecn,
                         );
                     } else {
-                        batch.addTxtime(
+                        batch.add(
                             self.out_buf[0..bytes_written],
                             @ptrCast(send_addr),
                             connection.sockaddrLen(send_addr),
                             conn.getEcnMark(),
-                            conn.last_target_txtime,
                         );
                     }
                 }
@@ -1014,12 +1013,11 @@ pub fn Server(comptime Handler: type) type {
                             &batch.current_ecn,
                         );
                     } else {
-                        batch.addTxtime(
+                        batch.add(
                             self.out_buf[0..bytes_written],
                             @ptrCast(send_addr),
                             connection.sockaddrLen(send_addr),
                             conn.getEcnMark(),
-                            conn.last_target_txtime,
                         );
                     }
                 }
@@ -1542,12 +1540,11 @@ pub fn Client(comptime Handler: type) type {
             while (send_count < 1000) : (send_count += 1) {
                 const bytes_written = conn.send(&self.out_buf) catch break;
                 if (bytes_written == 0) break;
-                self.batch.addTxtime(
+                self.batch.add(
                     self.out_buf[0..bytes_written],
                     @ptrCast(send_addr),
                     connection.sockaddrLen(send_addr),
                     conn.getEcnMark(),
-                    conn.last_target_txtime,
                 );
             }
             self.batch.flush();
@@ -1882,12 +1879,11 @@ pub fn Client(comptime Handler: type) type {
             while (send_count < max_burst_packets) : (send_count += 1) {
                 const bytes_written = conn.send(&self.out_buf) catch break;
                 if (bytes_written == 0) break;
-                self.batch.addTxtime(
+                self.batch.add(
                     self.out_buf[0..bytes_written],
                     @ptrCast(send_addr),
                     connection.sockaddrLen(send_addr),
                     conn.getEcnMark(),
-                    conn.last_target_txtime,
                 );
             }
             self.batch.flush();

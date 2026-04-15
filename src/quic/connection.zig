@@ -43,24 +43,6 @@ fn isPacingDisabled() bool {
     return v;
 }
 
-/// Mirror of `QUIC_ZIG_ENABLE_TXTIME` semantics in `ecn_socket.zig`.
-/// When set, `conn.send()` keeps producing packets while the pacer would have
-/// blocked, stamping each one with a CLOCK_MONOTONIC target tx time. The send
-/// path stores the target on `Connection.last_target_txtime` so the event loop
-/// can hand it to `SendBatch.addTxtime`. The actual SO_TXTIME socket setup
-/// happens in `SendBatch.init`; we don't probe the kernel here.
-var txtime_enabled_cache: ?bool = null;
-
-fn isKernelPacingEnabled() bool {
-    if (txtime_enabled_cache) |v| return v;
-    const v = blk: {
-        const raw = std.posix.getenv("QUIC_ZIG_ENABLE_TXTIME") orelse break :blk false;
-        break :blk !(raw.len == 0 or std.mem.eql(u8, raw, "0"));
-    };
-    txtime_enabled_cache = v;
-    return v;
-}
-
 pub const State = enum(u8) {
     first_flight = 0,
     handshake = 1,
@@ -596,11 +578,6 @@ pub const Connection = struct {
     pkt_handler: ack_handler.PacketHandler = undefined,
     cc: congestion.Cubic = congestion.Cubic.init(),
     pacer: congestion.Pacer = congestion.Pacer.init(),
-
-    /// CLOCK_MONOTONIC nanoseconds; non-zero when `send()` produced a packet
-    /// the kernel should hold until this time (SO_TXTIME). Read by the event
-    /// loop after each successful `send()` and reset on the next call.
-    last_target_txtime: u64 = 0,
     conn_flow_ctrl: flow_control.ConnectionFlowController = undefined,
     streams: stream_mod.StreamsMap = undefined,
     crypto_streams: crypto_stream.CryptoStreamManager = undefined,
@@ -2794,8 +2771,8 @@ pub const Connection = struct {
         if (self.state == .draining or self.state == .terminated) return 0;
 
         const now: i64 = @intCast(std.time.nanoTimestamp());
-        // Pacer runs on CLOCK_MONOTONIC so its timestamps can feed SO_TXTIME
-        // in the future; other subsystems stay on REALTIME.
+        // Pacer runs on CLOCK_MONOTONIC for NTP-skew resilience; other
+        // subsystems stay on REALTIME (they only compare deltas).
         const now_mono: i64 = clock.monoNanos();
 
         // Closing: retransmit saved close packet on each incoming packet (RFC 9000 §10.2.1)
@@ -2867,18 +2844,10 @@ pub const Connection = struct {
         // `nextTimeoutNs()` so libxev wakes us when the pacer has budget again.
         // Exceptions: PTO probes bypass pacing (RFC 9002 §6.2.4); the ACK-only
         // path above bypasses it per RFC 9002 §7.7.
-        // Reset target every send; only set if kernel pacing is taking over.
-        self.last_target_txtime = 0;
         if (self.pto_probe_pending == 0 and !isPacingDisabled()) {
             const pacer_delay = self.pacer.timeUntilSend(now_mono);
             if (pacer_delay > 0) {
-                if (isKernelPacingEnabled()) {
-                    // Kernel will hold the packet until target time; skip the
-                    // user-space wait but stamp the packet for the wire.
-                    self.last_target_txtime = @intCast(now_mono + pacer_delay);
-                } else {
-                    return 0;
-                }
+                return 0;
             }
         }
 

@@ -424,9 +424,9 @@ fn icbrt(x: u64) u64 {
 ///
 /// All timestamp arguments (`now` in `onPacketSent`, `timeUntilSend`, and
 /// `replenish`) MUST be on `CLOCK_MONOTONIC` — callers obtain them via
-/// `clock.monoNanos()`. This keeps `last_sent_time` directly usable as a
-/// `SCM_TXTIME` value when kernel-side pacing is enabled. Mixing clock
-/// sources across calls would silently corrupt budget replenishment.
+/// `clock.monoNanos()`. The monotonic clock makes budget replenishment
+/// immune to wall-clock jumps (NTP slews, manual time changes). Mixing
+/// clock sources across calls would silently corrupt budget math.
 pub const Pacer = struct {
     /// Available budget in bytes.
     budget: u64,

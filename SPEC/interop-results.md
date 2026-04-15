@@ -4,35 +4,31 @@ Date: 2026-04-15 (supersedes 2026-03-24 baseline below)
 Zig version: 0.15.2, quic-go interop image `martenseemann/quic-go-interop:latest`, neqo interop image `ghcr.io/mozilla/neqo-qns:latest`, webtransport-go interop image `martenseemann/webtransport-go-interop:latest`
 Build: Docker interop image from `interop/runner/Dockerfile`, `zig build -Doptimize=ReleaseSafe`
 
-## 2026-04-15: UDP send-path optimizations (`sendmmsg`, GSO opt-in, pacing kill switch)
+## 2026-04-15: UDP send-path optimizations (`sendmmsg` + pacer hardening)
 
-Following Cloudflare's "Accelerating UDP packet transmission for QUIC" post.
+Inspired by Cloudflare's "Accelerating UDP packet transmission for QUIC" post,
+narrowed to the techniques that fit a real-time WebTransport workload (small
+datagrams, latency-sensitive). Larger throughput-oriented optimizations (UDP
+GSO, SO_TXTIME kernel pacing) were prototyped, validated, and reverted —
+see "Cloudflare optimizations: what we kept and why" in `SPEC/STATUS.md` if
+revisiting in the future.
 
 ### Send-path toggles
-| Feature | Default | Env var | Status |
-|---------|---------|---------|--------|
-| `sendmmsg` batching | on (Linux) | `QUIC_ZIG_NO_SENDMMSG=1` disables | shipped — no regressions |
-| UDP GSO (`UDP_SEGMENT`) | **off (opt-in)** | `QUIC_ZIG_ENABLE_GSO=1` enables | experimental — see note below |
-| SO_TXTIME kernel pacing | **off (opt-in)** | `QUIC_ZIG_ENABLE_TXTIME=1` enables | shipped — no-op on non-`fq` egress |
-| User-space pacer | on | `QUIC_ZIG_NO_PACING=1` disables | unchanged default, kill switch added |
-| Pacer clock | always `CLOCK_MONOTONIC` | n/a | migrated for SO_TXTIME compat (Plan 4a) |
+| Feature | Default | Env var | Notes |
+|---------|---------|---------|-------|
+| `sendmmsg` batching | on (Linux) | `QUIC_ZIG_NO_SENDMMSG=1` disables | one syscall per ECN-mark run |
+| User-space pacer | on | `QUIC_ZIG_NO_PACING=1` disables | bisection escape hatch |
+| Pacer clock | always `CLOCK_MONOTONIC` | n/a | NTP-skew resilience |
 
 ### Matrix (sequential run, `handshake,transfer,chacha20,multiplexing,longrtt,http3,keyupdate`)
 
 |                           | quic-go (server/client) | neqo (server/client) |
 |---------------------------|-------------------------|----------------------|
 | quic-zig server ← peer client | **7/7 PASS**        | **7/7 PASS**         |
-| quic-zig client → peer server | **7/7 PASS**        | **7/7 PASS**         |
+| quic-zig client → peer server | **7/7 PASS**        | **6-7/7 PASS**       |
 
-Zero regressions against the 2026-03-24 baseline recorded below.
-
-### GSO / neqo interaction (known issue — why GSO is opt-in)
-
-With `QUIC_ZIG_ENABLE_GSO=1`, zig-client → neqo-server `transfer` fails: neqo server reports `TX blocked` around 10 s and idle-times-out. The client completes ~2/3 of the 10 MB across 3 files. All 26 other combos (quic-go peers, neqo-as-client, GSO-off everywhere) stay green, so the issue is specific to zig-GSO-on outbound to neqo-on-ns-3-veth.
-
-Sim pcap analysis: zig client emits 400+ packet ACK bursts at ~500 µs intervals (expected GSO signature). Sim delivers ~99.9 % of packets. No protocol-level anomaly visible without deeper neqo-side instrumentation. Root cause pending — likely either (a) neqo scheduler struggles with super-dense ACK bursts from a GSO sender on a 10 Mbps link, or (b) ns-3 veth path drops/reorders a subset of GSO segments in a way quic-go tolerates but neqo does not.
-
-Kill switch preserves the full Plan-1 (`sendmmsg`-only) path for users who want to stay away from GSO until this is resolved.
+Zero regressions against the 2026-03-24 baseline recorded below. The
+zig-client → neqo-server flake on `keyupdate`/`chacha20` predates this work.
 
 ## 2026-03-24 baseline (pre-optimization)
 
