@@ -24,6 +24,7 @@ const stateless_reset = @import("stateless_reset.zig");
 const ecn = @import("ecn.zig");
 const qlog = @import("qlog.zig");
 const quic_lb = @import("quic_lb.zig");
+const clock = @import("clock.zig");
 
 /// Bisection kill switch for the user-space pacer.
 /// When `QUIC_ZIG_NO_PACING=1` (or any non-empty non-"0" value) is set in the
@@ -2770,6 +2771,9 @@ pub const Connection = struct {
         if (self.state == .draining or self.state == .terminated) return 0;
 
         const now: i64 = @intCast(std.time.nanoTimestamp());
+        // Pacer runs on CLOCK_MONOTONIC so its timestamps can feed SO_TXTIME
+        // in the future; other subsystems stay on REALTIME.
+        const now_mono: i64 = clock.monoNanos();
 
         // Closing: retransmit saved close packet on each incoming packet (RFC 9000 §10.2.1)
         if (self.state == .closing) {
@@ -2841,7 +2845,7 @@ pub const Connection = struct {
         // Exceptions: PTO probes bypass pacing (RFC 9002 §6.2.4); the ACK-only
         // path above bypasses it per RFC 9002 §7.7.
         if (self.pto_probe_pending == 0 and !isPacingDisabled()) {
-            const pacer_delay = self.pacer.timeUntilSend(now);
+            const pacer_delay = self.pacer.timeUntilSend(now_mono);
             if (pacer_delay > 0) {
                 return 0;
             }
@@ -2953,7 +2957,7 @@ pub const Connection = struct {
             self.pto_probe_pending -|= 1;
             self.paths[self.active_path_idx].bytes_sent += bytes_written;
             self.total_packets_sent += 1;
-            self.pacer.onPacketSent(bytes_written, now);
+            self.pacer.onPacketSent(bytes_written, now_mono);
             self.last_packet_sent_time = now;
 
             // If more PTO probes are pending, re-queue stream data + crypto data
@@ -3790,10 +3794,15 @@ pub const Connection = struct {
         // Pacer: if the pacer has bandwidth set (active transfer), include its
         // next-send time so the event loop wakes up promptly to send more data.
         // Skipped when pacing is disabled via the env kill switch.
+        //
+        // The pacer stores `last_sent_time` on CLOCK_MONOTONIC; the deadline we
+        // return must be comparable to the REALTIME-based deadlines collected
+        // above, so compute the *delay* on the monotonic clock and add it to
+        // the REALTIME `now`.
         if (self.pacer.bandwidth_shifted > 0 and self.state == .connected and !isPacingDisabled()) {
-            const now: i64 = @intCast(std.time.nanoTimestamp());
-            // Estimate pacer delay without mutating: budget is replenished by elapsed time
-            const elapsed = now - self.pacer.last_sent_time;
+            const now_realtime: i64 = @intCast(std.time.nanoTimestamp());
+            const now_mono: i64 = clock.monoNanos();
+            const elapsed = now_mono - self.pacer.last_sent_time;
             var budget = self.pacer.budget;
             if (self.pacer.last_sent_time > 0 and elapsed > 0) {
                 const replenished = (self.pacer.bandwidth_shifted *| @as(u64, @intCast(elapsed))) >> 20;
@@ -3802,7 +3811,7 @@ pub const Connection = struct {
             if (budget < self.pacer.max_datagram_size) {
                 const deficit = self.pacer.max_datagram_size - budget;
                 const delay: i64 = @intCast((deficit << 20) / self.pacer.bandwidth_shifted);
-                const pacer_deadline = now + delay;
+                const pacer_deadline = now_realtime + delay;
                 if (earliest == null or pacer_deadline < earliest.?) {
                     earliest = pacer_deadline;
                 }
