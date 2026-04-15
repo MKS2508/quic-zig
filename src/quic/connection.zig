@@ -25,6 +25,23 @@ const ecn = @import("ecn.zig");
 const qlog = @import("qlog.zig");
 const quic_lb = @import("quic_lb.zig");
 
+/// Bisection kill switch for the user-space pacer.
+/// When `QUIC_ZIG_NO_PACING=1` (or any non-empty non-"0" value) is set in the
+/// environment, `conn.send()` and `nextTimeoutNs()` behave as if the pacer
+/// never blocks. `Pacer.onPacketSent` and `setBandwidth` continue to run so
+/// bisection can be toggled without polluting CC state.
+var pacing_disabled_cache: ?bool = null;
+
+fn isPacingDisabled() bool {
+    if (pacing_disabled_cache) |v| return v;
+    const v = blk: {
+        const raw = std.posix.getenv("QUIC_ZIG_NO_PACING") orelse break :blk false;
+        break :blk !(raw.len == 0 or std.mem.eql(u8, raw, "0"));
+    };
+    pacing_disabled_cache = v;
+    return v;
+}
+
 pub const State = enum(u8) {
     first_flight = 0,
     handshake = 1,
@@ -2818,10 +2835,12 @@ pub const Connection = struct {
             return try self.sendAckOnly(out_buf, now);
         }
 
-        // Check if pacer allows sending
-        // Exception: PTO probes bypass pacing (RFC 9002 §6.2.4)
-        // Note: ACK-only path above bypasses pacer per RFC 9002 §7.7
-        if (self.pto_probe_pending == 0) {
+        // Pacer gate. Returning 0 here is how the event loop breaks out of
+        // its burst send loop; the next send time is then surfaced via
+        // `nextTimeoutNs()` so libxev wakes us when the pacer has budget again.
+        // Exceptions: PTO probes bypass pacing (RFC 9002 §6.2.4); the ACK-only
+        // path above bypasses it per RFC 9002 §7.7.
+        if (self.pto_probe_pending == 0 and !isPacingDisabled()) {
             const pacer_delay = self.pacer.timeUntilSend(now);
             if (pacer_delay > 0) {
                 return 0;
@@ -3770,7 +3789,8 @@ pub const Connection = struct {
 
         // Pacer: if the pacer has bandwidth set (active transfer), include its
         // next-send time so the event loop wakes up promptly to send more data.
-        if (self.pacer.bandwidth_shifted > 0 and self.state == .connected) {
+        // Skipped when pacing is disabled via the env kill switch.
+        if (self.pacer.bandwidth_shifted > 0 and self.state == .connected and !isPacingDisabled()) {
             const now: i64 = @intCast(std.time.nanoTimestamp());
             // Estimate pacer delay without mutating: budget is replenished by elapsed time
             const elapsed = now - self.pacer.last_sent_time;
