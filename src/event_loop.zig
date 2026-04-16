@@ -193,13 +193,20 @@ pub const Session = struct {
     // --- Raw QUIC methods ---
 
     pub fn writeStream(self: *Session, stream_id: u64, data: []const u8) !void {
-        const stream = self.entry.conn.streams.getStream(stream_id) orelse return error.StreamNotFound;
-        try stream.send.writeData(data);
+        if (self.entry.conn.streams.getStream(stream_id)) |stream| {
+            return stream.send.writeData(data);
+        }
+        if (self.entry.conn.streams.send_streams.get(stream_id)) |ss| {
+            return ss.writeData(data);
+        }
+        return error.StreamNotFound;
     }
 
     pub fn closeQuicStream(self: *Session, stream_id: u64) void {
         if (self.entry.conn.streams.getStream(stream_id)) |stream| {
             stream.send.close();
+        } else if (self.entry.conn.streams.send_streams.get(stream_id)) |ss| {
+            ss.close();
         }
     }
 
@@ -940,6 +947,7 @@ pub fn Server(comptime Handler: type) type {
                 self.handler.onPollComplete(&session);
             }
 
+            // Poll bidirectional streams.
             var stream_it = conn.streams.streams.iterator();
             while (stream_it.next()) |kv| {
                 const stream_id = kv.key_ptr.*;
@@ -952,6 +960,24 @@ pub fn Server(comptime Handler: type) type {
                     self.allocator.free(data);
                 }
                 if (stream.recv.finished and !entry.finished_streams.contains(stream_id)) {
+                    entry.finished_streams.put(self.allocator, stream_id, {}) catch {};
+                    self.dispatchStreamData(&session, stream_id, &[_]u8{}, true);
+                }
+            }
+
+            // Poll peer-initiated unidirectional receive streams.
+            var recv_it = conn.streams.recv_streams.iterator();
+            while (recv_it.next()) |kv| {
+                const stream_id = kv.key_ptr.*;
+                const rs = kv.value_ptr.*;
+
+                if (rs.read()) |data| {
+                    const fin = rs.finished;
+                    if (fin) entry.finished_streams.put(self.allocator, stream_id, {}) catch {};
+                    self.dispatchStreamData(&session, stream_id, data, fin);
+                    self.allocator.free(data);
+                }
+                if (rs.finished and !entry.finished_streams.contains(stream_id)) {
                     entry.finished_streams.put(self.allocator, stream_id, {}) catch {};
                     self.dispatchStreamData(&session, stream_id, &[_]u8{}, true);
                 }
@@ -1156,19 +1182,31 @@ pub const ClientSession = struct {
     }
 
     pub fn writeStream(self: *ClientSession, stream_id: u64, data: []const u8) !void {
-        const stream = self.conn.streams.getStream(stream_id) orelse return error.StreamNotFound;
-        try stream.send.writeData(data);
+        if (self.conn.streams.getStream(stream_id)) |stream| {
+            return stream.send.writeData(data);
+        }
+        if (self.conn.streams.send_streams.get(stream_id)) |ss| {
+            return ss.writeData(data);
+        }
+        return error.StreamNotFound;
     }
 
     pub fn closeQuicStream(self: *ClientSession, stream_id: u64) void {
         if (self.conn.streams.getStream(stream_id)) |stream| {
             stream.send.close();
+        } else if (self.conn.streams.send_streams.get(stream_id)) |ss| {
+            ss.close();
         }
     }
 
     pub fn readStream(self: *ClientSession, stream_id: u64) ?[]const u8 {
-        const stream = self.conn.streams.getStream(stream_id) orelse return null;
-        return stream.recv.read();
+        if (self.conn.streams.getStream(stream_id)) |stream| {
+            return stream.recv.read();
+        }
+        if (self.conn.streams.recv_streams.get(stream_id)) |rs| {
+            return rs.read();
+        }
+        return null;
     }
 
     // --- WebTransport methods ---
@@ -1839,6 +1877,24 @@ pub fn Client(comptime Handler: type) type {
                     self.allocator.free(data);
                 }
                 if (stream.recv.finished and !self.finished_streams.contains(stream_id)) {
+                    self.finished_streams.put(stream_id, {}) catch {};
+                    self.dispatchStreamData(&session, stream_id, &[_]u8{}, true);
+                }
+            }
+
+            // Poll peer-initiated unidirectional receive streams.
+            var recv_it = conn.streams.recv_streams.iterator();
+            while (recv_it.next()) |recv_entry| {
+                const stream_id = recv_entry.key_ptr.*;
+                const rs = recv_entry.value_ptr.*;
+
+                if (rs.read()) |data| {
+                    const fin = rs.finished;
+                    if (fin) self.finished_streams.put(stream_id, {}) catch {};
+                    self.dispatchStreamData(&session, stream_id, data, fin);
+                    self.allocator.free(data);
+                }
+                if (rs.finished and !self.finished_streams.contains(stream_id)) {
                     self.finished_streams.put(stream_id, {}) catch {};
                     self.dispatchStreamData(&session, stream_id, &[_]u8{}, true);
                 }
