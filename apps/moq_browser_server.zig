@@ -27,8 +27,29 @@ const MAX_TRACKS: usize = 16;
 const MAX_SUBS_PER_TRACK: usize = 8;
 const MAX_STREAMS_PER_CLIENT: usize = 64;
 const STREAM_BUF_SIZE: usize = 65_536; // VP8 keyframes typically ≤ 16 KB
+const N_CACHED_GROUPS: usize = 2; // number of completed groups retained per track
+const CACHE_GROUP_SIZE: usize = 256 * 1024; // 256 KB of object payload per group
 
 const StreamRole = enum { control, request, data, unknown };
+
+// One completed (or in-progress) group's worth of object payload bytes cached
+// at the relay. Header fields are stored so we can rebuild a valid subgroup
+// stream header for a late subscriber with its own track alias.
+const CachedGroup = struct {
+    valid: bool = false,
+    group_id: u64 = 0,
+    subgroup_id: u64 = 0,
+    publisher_priority: ?u8 = 128,
+    end_of_group: bool = true,
+    per_object_properties: bool = false,
+    payload: [CACHE_GROUP_SIZE]u8 = undefined,
+    payload_len: usize = 0,
+
+    fn reset(self: *CachedGroup) void {
+        self.valid = false;
+        self.payload_len = 0;
+    }
+};
 
 const Track = struct {
     namespace_buf: [256]u8 = undefined,
@@ -42,9 +63,37 @@ const Track = struct {
     sub_alias: [MAX_SUBS_PER_TRACK]u64 = [_]u64{0} ** MAX_SUBS_PER_TRACK,
     sub_count: usize = 0,
 
+    // Completed groups cached for late subscribers.
+    cached: [N_CACHED_GROUPS]CachedGroup = [_]CachedGroup{.{}} ** N_CACHED_GROUPS,
+    next_cache_idx: usize = 0,
+    // The live group being assembled from the publisher's current stream.
+    live: CachedGroup = .{},
+
     fn matchesNsName(self: *const Track, ns: []const u8, name: []const u8) bool {
         return std.mem.eql(u8, self.namespace_buf[0..self.namespace_len], ns) and
             std.mem.eql(u8, self.name_buf[0..self.name_len], name);
+    }
+
+    // Store a completed group; oldest entry is overwritten.
+    fn cacheGroup(self: *Track, src: *const CachedGroup) void {
+        self.cached[self.next_cache_idx] = src.*;
+        self.cached[self.next_cache_idx].valid = true;
+        self.next_cache_idx = (self.next_cache_idx + 1) % N_CACHED_GROUPS;
+    }
+
+    // Iterate cached groups from oldest to newest.
+    fn cachedInOrder(self: *const Track, out: *[N_CACHED_GROUPS]*const CachedGroup) usize {
+        var count: usize = 0;
+        // Start at next_cache_idx (oldest slot) and walk forward.
+        var i: usize = 0;
+        while (i < N_CACHED_GROUPS) : (i += 1) {
+            const idx = (self.next_cache_idx + i) % N_CACHED_GROUPS;
+            if (self.cached[idx].valid) {
+                out[count] = &self.cached[idx];
+                count += 1;
+            }
+        }
+        return count;
     }
 };
 
@@ -126,6 +175,7 @@ const FwdState = struct {
     active: bool = false,
     header_parsed: bool = false,
     forwarded_pos: usize = 0, // byte offset in publisher stream (after subgroup header)
+    track_idx: ?usize = null,
     out_stream_ids: [MAX_SUBS_PER_TRACK]u64 = [_]u64{0} ** MAX_SUBS_PER_TRACK,
     out_sub_idx: [MAX_SUBS_PER_TRACK]usize = [_]usize{0} ** MAX_SUBS_PER_TRACK,
     out_count: usize = 0,
@@ -304,7 +354,43 @@ const RelayHandler = struct {
             std.debug.print("[relay] SUBSCRIBE_OK → client {d} alias={d} (track {d}, {d} subs, pub={?d})\n", .{
                 ci, alias, ti, t.sub_count, t.publisher_idx,
             });
+
+            // Replay any cached groups to this new subscriber so it starts
+            // playback immediately instead of waiting for the next keyframe.
+            self.replayCachedGroups(ci, t, alias);
         }
+    }
+
+    // Replay every cached complete group to a freshly-subscribed subscriber.
+    // Each cached group is sent as a fresh uni stream on the subscriber's WT
+    // session with the subscriber's track alias remapped.
+    fn replayCachedGroups(self: *RelayHandler, sub_ci: usize, t: *const Track, sub_alias: u64) void {
+        if (!self.clients[sub_ci].active) return;
+        const sub_entry = self.clients[sub_ci].entry orelse return;
+        var sub_wtc = if (sub_entry.wt_conn) |*w| w else return;
+        const sub_sid = self.clients[sub_ci].wt_session_id;
+
+        var slots: [N_CACHED_GROUPS]*const CachedGroup = undefined;
+        const n = t.cachedInOrder(&slots);
+        for (0..n) |i| {
+            const cg = slots[i];
+            const out = sub_wtc.openUniStream(sub_sid, null) catch continue;
+
+            var hdr_buf: [128]u8 = undefined;
+            var hdr_fbs = std.io.fixedBufferStream(&hdr_buf);
+            moq_obj.writeSubgroupHeader(hdr_fbs.writer(), .{
+                .track_alias = sub_alias,
+                .group = cg.group_id,
+                .subgroup = cg.subgroup_id,
+                .publisher_priority = cg.publisher_priority,
+                .end_of_group = cg.end_of_group,
+                .per_object_properties = cg.per_object_properties,
+            }) catch continue;
+            sub_wtc.sendStreamData(out, hdr_buf[0..hdr_fbs.pos]) catch continue;
+            sub_wtc.sendStreamData(out, cg.payload[0..cg.payload_len]) catch {};
+            sub_wtc.closeStream(out);
+        }
+        if (n > 0) std.debug.print("[relay] Replayed {d} cached groups to client {d}\n", .{ n, sub_ci });
     }
 
     fn handlePublish(self: *RelayHandler, ci: usize, session: *event_loop.Session, stream_id: u64, payload: []const u8) void {
@@ -359,6 +445,16 @@ const RelayHandler = struct {
             }
             const ti = track_idx orelse return;
             const t = &self.tracks[ti];
+            fs.track_idx = ti;
+
+            // Initialize the live cache for this group on the track.
+            t.live.reset();
+            t.live.valid = false;
+            t.live.group_id = h.group;
+            t.live.subgroup_id = h.subgroup orelse 0;
+            t.live.publisher_priority = h.publisher_priority;
+            t.live.end_of_group = h.end_of_group;
+            t.live.per_object_properties = h.per_object_properties;
 
             // Open a subscriber output stream for each subscriber, write rewritten header.
             fs.out_count = 0;
@@ -396,9 +492,20 @@ const RelayHandler = struct {
             fs.forwarded_pos = fbs.pos;
         }
 
-        // Forward any newly arrived bytes.
+        // Forward any newly arrived bytes AND append them to the live cache.
         if (fs.forwarded_pos < buf.len) {
             const chunk = buf.slice()[fs.forwarded_pos..];
+            // Append to live cache (so late subscribers can catch up later).
+            if (fs.track_idx) |ti_cap| {
+                const t = &self.tracks[ti_cap];
+                const free = t.live.payload.len - t.live.payload_len;
+                const copy_n = @min(chunk.len, free);
+                if (copy_n > 0) {
+                    @memcpy(t.live.payload[t.live.payload_len .. t.live.payload_len + copy_n], chunk[0..copy_n]);
+                    t.live.payload_len += copy_n;
+                }
+            }
+            // Forward to currently-attached subscribers.
             for (0..fs.out_count) |i| {
                 const sub_ci = fs.out_sub_idx[i];
                 if (!self.clients[sub_ci].active) continue;
@@ -411,7 +518,7 @@ const RelayHandler = struct {
             fs.forwarded_pos = buf.len;
         }
 
-        // On FIN: close all sub-streams.
+        // On FIN: close all sub-streams and commit the live cache.
         if (fin) {
             for (0..fs.out_count) |i| {
                 const sub_ci = fs.out_sub_idx[i];
@@ -419,6 +526,16 @@ const RelayHandler = struct {
                 const sub_entry = self.clients[sub_ci].entry orelse continue;
                 var sub_wtc = if (sub_entry.wt_conn) |*w| w else continue;
                 sub_wtc.closeStream(fs.out_stream_ids[i]);
+            }
+            if (fs.track_idx) |ti_cap| {
+                const t = &self.tracks[ti_cap];
+                if (t.live.payload_len > 0) {
+                    t.cacheGroup(&t.live);
+                    std.debug.print("[relay] cached group {d} for track {d} ({d} bytes)\n", .{
+                        t.live.group_id, ti_cap, t.live.payload_len,
+                    });
+                }
+                t.live.reset();
             }
         }
 

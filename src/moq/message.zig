@@ -142,9 +142,11 @@ pub const RequestOk = struct {
 };
 
 pub fn writeRequestOk(writer: anytype, r: RequestOk) !void {
+    _ = r;
+    // Draft-17: no request_id, just an empty parameter list (count=0).
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    try wire.encodeKvList(fbs.writer(), r.parameters);
+    try wire.writeVarInt(fbs.writer(), 0); // param count
     try writeEnvelope(writer, codes.MSG_REQUEST_OK, scratch[0..fbs.pos]);
 }
 
@@ -290,10 +292,13 @@ pub fn writeSubscribeOk(writer: anytype, s: SubscribeOk) !void {
     var fbs = io.fixedBufferStream(&scratch);
     const w = fbs.writer();
     try wire.writeVarInt(w, s.track_alias);
-    // Parameters
+    // Message parameters: count-prefixed, delta keys, type-specific values.
     if (s.group_order) |go| {
+        try wire.writeVarInt(w, 1); // param count
         try wire.writeVarInt(w, PARAM_GROUP_ORDER); // delta from 0
-        try wire.writeVarInt(w, @intFromEnum(go));
+        try w.writeByte(@intFromEnum(go)); // GroupOrder: raw byte (u8 Param)
+    } else {
+        try wire.writeVarInt(w, 0); // empty params
     }
     try writeEnvelope(writer, codes.MSG_SUBSCRIBE_OK, scratch[0..fbs.pos]);
 }
@@ -382,14 +387,12 @@ pub const PublishOk = struct {
 };
 
 pub fn writePublishOk(writer: anytype, p: PublishOk) !void {
+    _ = p;
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    const w = fbs.writer();
-    try w.writeByte(if (p.content_exists) 1 else 0);
-    if (p.largest) |loc| {
-        try wire.writeVarInt(w, loc.group);
-        try wire.writeVarInt(w, loc.object);
-    }
+    // Empty parameter list (count=0). Proper draft-17 PUBLISH_OK body encoding
+    // will expand this when we need more fields.
+    try wire.writeVarInt(fbs.writer(), 0);
     try writeEnvelope(writer, codes.MSG_PUBLISH_OK, scratch[0..fbs.pos]);
 }
 

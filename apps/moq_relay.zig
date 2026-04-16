@@ -32,6 +32,26 @@ const MAX_SUBS_PER_TRACK: usize = 16;
 
 const StreamRole = enum { control, request, data, unknown };
 
+const STREAM_BUF_SIZE: usize = 64 * 1024;
+const MAX_STREAM_SLOTS: usize = 32;
+
+const StreamBuf = struct {
+    data: [STREAM_BUF_SIZE]u8 = undefined,
+    len: usize = 0,
+
+    fn append(self: *StreamBuf, bytes: []const u8) void {
+        const n = @min(bytes.len, self.data.len - self.len);
+        @memcpy(self.data[self.len .. self.len + n], bytes[0..n]);
+        self.len += n;
+    }
+    fn slice(self: *const StreamBuf) []const u8 {
+        return self.data[0..self.len];
+    }
+    fn reset(self: *StreamBuf) void {
+        self.len = 0;
+    }
+};
+
 // A published track from a client.
 const Track = struct {
     namespace_buf: [256]u8 = undefined,
@@ -62,6 +82,10 @@ const Client = struct {
     control_out: ?u64 = null,
     next_alias: u64 = 1,
     stream_roles: [256]StreamRole = [_]StreamRole{.unknown} ** 256,
+    // Slot-based buffer for streams currently being identified (role=.unknown)
+    // or accumulating request messages that span multiple chunks.
+    slot_ids: [MAX_STREAM_SLOTS]u64 = [_]u64{std.math.maxInt(u64)} ** MAX_STREAM_SLOTS,
+    slot_bufs: [MAX_STREAM_SLOTS]StreamBuf = [_]StreamBuf{.{}} ** MAX_STREAM_SLOTS,
 
     fn setRole(self: *Client, sid: u64, role: StreamRole) void {
         if (sid < 256) self.stream_roles[@intCast(sid)] = role;
@@ -69,6 +93,26 @@ const Client = struct {
     fn getRole(self: *Client, sid: u64) StreamRole {
         if (sid < 256) return self.stream_roles[@intCast(sid)];
         return .unknown;
+    }
+    fn slotFor(self: *Client, sid: u64) ?*StreamBuf {
+        for (&self.slot_ids, 0..) |id, i| if (id == sid) return &self.slot_bufs[i];
+        for (&self.slot_ids, 0..) |id, i| {
+            if (id == std.math.maxInt(u64)) {
+                self.slot_ids[i] = sid;
+                self.slot_bufs[i].reset();
+                return &self.slot_bufs[i];
+            }
+        }
+        return null;
+    }
+    fn freeSlot(self: *Client, sid: u64) void {
+        for (&self.slot_ids, 0..) |id, i| {
+            if (id == sid) {
+                self.slot_ids[i] = std.math.maxInt(u64);
+                self.slot_bufs[i].reset();
+                return;
+            }
+        }
     }
 };
 
@@ -127,9 +171,8 @@ const RelayHandler = struct {
         if (data.len == 0) return;
         const conn = session.entry.conn;
         const ci = self.findOrCreateClient(conn) orelse return;
-        var client = &self.clients[ci];
 
-        const role = client.getRole(stream_id);
+        const role = self.clients[ci].getRole(stream_id);
         switch (role) {
             .unknown => self.handleNewStream(ci, stream_id, data),
             .control => {},
@@ -139,10 +182,25 @@ const RelayHandler = struct {
     }
 
     fn handleNewStream(self: *RelayHandler, ci: usize, stream_id: u64, data: []const u8) void {
-        const parsed = moq_msg.parseEnvelope(data) catch {
-            // Might be a data stream (subgroup header from a publisher).
+        // Buffer the stream bytes until we can identify its role.
+        const buf = self.clients[ci].slotFor(stream_id) orelse {
+            // Slots exhausted: abandon this stream.
             self.clients[ci].setRole(stream_id, .data);
-            self.handleDataStream(ci, stream_id, data);
+            return;
+        };
+        buf.append(data);
+
+        // Need at least 3 bytes to parse envelope (varint type + u16 length).
+        if (buf.len < 3) return;
+
+        const parsed = moq_msg.parseEnvelope(buf.slice()) catch {
+            // If we already have enough bytes but envelope parsing still
+            // fails, treat it as a data stream (publisher subgroup header).
+            if (buf.len >= 3) {
+                self.clients[ci].setRole(stream_id, .data);
+                self.handleDataStream(ci, stream_id, buf.slice());
+                self.clients[ci].freeSlot(stream_id);
+            }
             return;
         };
 
@@ -164,17 +222,26 @@ const RelayHandler = struct {
             const ctrl = conn.openUniStream() catch return;
             self.clients[ci].control_out = ctrl.stream_id;
 
-            var buf: [256]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&buf);
+            var setup_buf: [256]u8 = undefined;
+            var fbs = std.io.fixedBufferStream(&setup_buf);
             moq_msg.writeSetup(fbs.writer(), .{
                 .implementation = "quic-zig/moq-relay",
             }) catch return;
-            ctrl.writeData(buf[0..fbs.pos]) catch return;
+            ctrl.writeData(setup_buf[0..fbs.pos]) catch return;
             self.clients[ci].setup_done = true;
             std.debug.print("[relay] Sent SETUP to client {d}\n", .{ci});
+            self.clients[ci].freeSlot(stream_id);
         } else {
+            // It's a request on a bidi stream. Pass the buffered payload to
+            // the request handler so it has the full envelope.
             self.clients[ci].setRole(stream_id, .request);
-            self.handleRequest(ci, stream_id, data);
+            const full = self.clients[ci].slotFor(stream_id).?.slice();
+            // Copy slice before freeing the slot.
+            var req_buf: [STREAM_BUF_SIZE]u8 = undefined;
+            @memcpy(req_buf[0..full.len], full);
+            const full_len = full.len;
+            self.clients[ci].freeSlot(stream_id);
+            self.handleRequest(ci, stream_id, req_buf[0..full_len]);
         }
     }
 
@@ -183,8 +250,87 @@ const RelayHandler = struct {
         switch (parsed.env.type) {
             moq_codes.MSG_SUBSCRIBE => self.handleSubscribe(ci, stream_id, parsed.env.payload),
             moq_codes.MSG_PUBLISH => self.handlePublish(ci, stream_id, parsed.env.payload),
+            moq_codes.MSG_SUBSCRIBE_NAMESPACE => self.handleSubscribeNamespace(ci, stream_id, parsed.env.payload),
+            moq_codes.MSG_PUBLISH_NAMESPACE => self.handlePublishNamespace(ci, stream_id, parsed.env.payload),
             else => std.debug.print("[relay] Request type=0x{x} from client {d}\n", .{ parsed.env.type, ci }),
         }
+    }
+
+    fn handleSubscribeNamespace(self: *RelayHandler, ci: usize, stream_id: u64, payload: []const u8) void {
+        // Parse prefix tuple from payload.
+        var fbs = std.io.fixedBufferStream(payload);
+        const reader = fbs.reader();
+        // request_id + delta (draft-17 request messages start with these).
+        _ = moq_wire.readVarInt(reader) catch return; // request_id
+        _ = moq_wire.readVarInt(reader) catch return; // required_request_id_delta
+        // Namespace prefix tuple.
+        const count = moq_wire.readVarInt(reader) catch return;
+        if (count > 32) return;
+        var prefix_parts: [32][]const u8 = undefined;
+        for (0..@as(usize, @intCast(count))) |i| {
+            prefix_parts[i] = moq_wire.readVarBytesZc(&fbs) catch return;
+        }
+
+        var prefix_key: [256]u8 = undefined;
+        const prefix_len = serializeNs(prefix_parts[0..@as(usize, @intCast(count))], &prefix_key);
+        std.debug.print("[relay] SUBSCRIBE_NAMESPACE client={d} prefix=\"{s}\"\n", .{ ci, prefix_key[0..prefix_len] });
+
+        const conn = self.clients[ci].conn orelse return;
+        const stream = conn.streams.getStream(stream_id) orelse return;
+
+        // Reply REQUEST_OK on the same bidi stream.
+        var buf: [64]u8 = undefined;
+        var ok_fbs = std.io.fixedBufferStream(&buf);
+        moq_msg.writeRequestOk(ok_fbs.writer(), .{}) catch return;
+        stream.send.writeData(buf[0..ok_fbs.pos]) catch return;
+
+        // Push NAMESPACE for each currently-known track whose namespace
+        // starts with this prefix.
+        var sent: usize = 0;
+        for (self.tracks[0..self.track_count]) |*t| {
+            if (!t.active) continue;
+            const tns = t.namespace_buf[0..t.namespace_len];
+            if (tns.len < prefix_len) continue;
+            if (!std.mem.startsWith(u8, tns, prefix_key[0..prefix_len])) continue;
+            self.sendNamespaceOnStream(stream_id, ci, tns) catch continue;
+            sent += 1;
+        }
+        std.debug.print("[relay] sent {d} NAMESPACE entries for prefix\n", .{sent});
+    }
+
+    fn sendNamespaceOnStream(self: *RelayHandler, stream_id: u64, ci: usize, ns_flat: []const u8) !void {
+        // ns_flat is "a/b/c/" (slash-separated). Split back into tuple parts.
+        var parts_buf: [32][]const u8 = undefined;
+        var n_parts: usize = 0;
+        var it = std.mem.splitScalar(u8, ns_flat, '/');
+        while (it.next()) |p| {
+            if (p.len == 0) continue;
+            if (n_parts >= 32) break;
+            parts_buf[n_parts] = p;
+            n_parts += 1;
+        }
+
+        const conn = self.clients[ci].conn orelse return;
+        const stream = conn.streams.getStream(stream_id) orelse return;
+
+        var buf: [512]u8 = undefined;
+        var ns_fbs = std.io.fixedBufferStream(&buf);
+        try moq_msg.writeNamespace(ns_fbs.writer(), .{ .track_namespace = parts_buf[0..n_parts] });
+        try stream.send.writeData(buf[0..ns_fbs.pos]);
+    }
+
+    fn handlePublishNamespace(self: *RelayHandler, ci: usize, stream_id: u64, payload: []const u8) void {
+        _ = payload; // parsing not required — we accept any prefix
+        std.debug.print("[relay] PUBLISH_NAMESPACE client={d}\n", .{ci});
+
+        const conn = self.clients[ci].conn orelse return;
+        const stream = conn.streams.getStream(stream_id) orelse return;
+
+        var buf: [64]u8 = undefined;
+        var ok_fbs = std.io.fixedBufferStream(&buf);
+        moq_msg.writeRequestOk(ok_fbs.writer(), .{}) catch return;
+        stream.send.writeData(buf[0..ok_fbs.pos]) catch return;
+        std.debug.print("[relay] sent REQUEST_OK for publish_namespace\n", .{});
     }
 
     fn handleSubscribe(self: *RelayHandler, ci: usize, stream_id: u64, payload: []const u8) void {
@@ -448,8 +594,31 @@ pub fn main() !void {
     std.debug.print("\n=== MoQ Relay (draft-17) ===\n", .{});
     std.debug.print("Listening on 0.0.0.0:{d}  ALPN: {s}\n\n", .{ port, moq_version.ALPN });
 
-    var handler = RelayHandler{};
-    var server = try event_loop.Server(RelayHandler).init(alloc, &handler, .{
+    const handler = try alloc.create(RelayHandler);
+    handler.* = RelayHandler{};
+
+    // Pre-register synthetic origin tracks so SUBSCRIBE_NAMESPACE discovery
+    // returns something even before any client publishes. This makes the
+    // relay usable as a standalone origin for interop tests (e.g. moq-rs
+    // `moq-clock --broadcast moq-clock subscribe`).
+    const origin_tracks = [_]struct { ns: []const u8, name: []const u8 }{
+        .{ .ns = "moq-clock/", .name = "seconds" },
+        .{ .ns = "test/", .name = "seconds" },
+    };
+    for (origin_tracks) |t| {
+        if (handler.track_count >= MAX_TRACKS) break;
+        const idx = handler.track_count;
+        handler.track_count += 1;
+        var tk = &handler.tracks[idx];
+        tk.active = true;
+        @memcpy(tk.namespace_buf[0..t.ns.len], t.ns);
+        tk.namespace_len = t.ns.len;
+        @memcpy(tk.name_buf[0..t.name.len], t.name);
+        tk.name_len = t.name.len;
+        std.debug.print("[relay] Pre-registered synthetic track: {s}/{s}\n", .{ t.ns, t.name });
+    }
+
+    var server = try event_loop.Server(RelayHandler).init(alloc, handler, .{
         .address = "0.0.0.0",
         .port = port,
         .cert_path = cert_path,
