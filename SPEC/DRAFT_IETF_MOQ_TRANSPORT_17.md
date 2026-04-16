@@ -159,14 +159,28 @@ Invalid datagram types: `0x22, 0x23, 0x26, 0x27, 0x2A, 0x2B, 0x2E, 0x2F` (STATUS
 
 | Component | State |
 | --- | --- |
-| Wire primitives (`src/moq/wire.zig`, `message_codes.zig`) | in progress |
-| Control message codec (`src/moq/message.zig`) | not started |
-| Object framing (`src/moq/object.zig`) | not started |
-| Transport abstraction | not started |
-| Session / SETUP | not started |
-| Publisher / Subscriber | not started |
-| Relay | not started |
-| Interop vs moq-rs | not started |
+| Wire primitives (`src/moq/wire.zig`, `message_codes.zig`) | done; 15 tests |
+| Control message codec (`src/moq/message.zig`) | done for SETUP, GOAWAY, REQUEST_OK/ERROR, SUBSCRIBE(+parameters), SUBSCRIBE_OK, PUBLISH, PUBLISH_OK/DONE, PUBLISH_NAMESPACE/BLOCKED, NAMESPACE/DONE, SUBSCRIBE_NAMESPACE, FETCH/FETCH_OK, TRACK_STATUS, REQUEST_UPDATE |
+| Object framing (`src/moq/object.zig`) | subgroup headers (all id-mode + priority variants), datagram objects, fetch stream headers — done with round-trip tests |
+| Transport abstraction | skipped — built directly on event_loop's `.quic` and `.webtransport` protocols |
+| Session / SETUP | done in-app (not as library abstraction); verified Zig↔Zig and Zig↔moq-rs |
+| Publisher / Subscriber | `moq_client.zig` has `--mode publish` / subscribe; `moq_server.zig` is a publisher |
+| Relay | done in `apps/moq_relay.zig`: pub/sub fanout with alias remapping + synthetic origin |
+| Browser (WebTransport) demo | done in `apps/moq_browser_server.zig` + `interop/browser/moq.html` |
+| Interop vs moq-rs | SETUP + SUBSCRIBE validated (wire format confirmed); data plane blocked by moq-rs auth config (their issue) |
+| Datagram objects | codec done + tested; runtime path deferred (needs `.quic` datagram dispatch in event_loop) |
+| FETCH stream | header codec done; runtime request/response flow deferred |
+| Namespace discovery | message codecs done (SUBSCRIBE_NAMESPACE, NAMESPACE, NAMESPACE_DONE, PUBLISH_NAMESPACE); runtime flow deferred |
+
+## Verified interop matrix
+
+| Scenario | SETUP | SUBSCRIBE | Objects |
+| --- | --- | --- | --- |
+| Zig ↔ Zig (raw QUIC, loopback) | ✅ | ✅ | ✅ |
+| Zig client → moq-rs relay | ✅ | ✅ (`subscribe started` logged) | ⚠ blocked by moq-rs publisher auth |
+| moq-rs client → Zig server | ✅ | n/a (subscriber idle) | n/a |
+| Browser (Chrome) ↔ Zig WT server | ✅ | ✅ | ✅ |
+| Zig pub → Zig relay → Zig sub | ✅ | ✅ | ✅ (built-in origin) |
 
 ## Caveats and deferred work
 

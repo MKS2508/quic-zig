@@ -539,6 +539,27 @@ Track at: https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/
 | RFC 9369 (QUIC v2) | 7 | 0 | 0 | 100% |
 | WebTransport | 17 | 0 | 0 | 100% |
 | ACK Frequency | 7 | 0 | 0 | 100% |
+| MoQ Transport (draft-17) | 8 | 3 | 0 | see below |
+
+### MoQ Transport (draft-ietf-moq-transport-17)
+
+See [DRAFT_IETF_MOQ_TRANSPORT_17.md](DRAFT_IETF_MOQ_TRANSPORT_17.md) for details.
+
+| Component | Status |
+|---|---|
+| Wire primitives (leading-ones varint, KV codec, tuples) | ✅ Done |
+| Control messages (SETUP, SUBSCRIBE, PUBLISH, FETCH, NAMESPACE, …) | ✅ Done (18 types) |
+| Object framing (subgroup streams, datagrams, fetch streams) | ✅ Done |
+| Session SETUP handshake | ✅ Done |
+| Subscribe flow (raw QUIC) | ✅ Done |
+| Publish flow (raw QUIC) | ✅ Done |
+| Relay with alias-remapping fanout | ✅ Done |
+| WebTransport browser client/server | ✅ Done |
+| Datagram-object runtime (raw QUIC) | ⚠ Codec only |
+| FETCH request/response runtime | ⚠ Codec only |
+| Namespace-discovery runtime | ⚠ Codec only |
+| moq-rs interop (SETUP + SUBSCRIBE) | ✅ Validated |
+| moq-rs interop (data plane) | ⚠ Blocked by moq-rs auth config |
 
 ### Top Priority Items Across All RFCs
 
