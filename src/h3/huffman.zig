@@ -16,7 +16,7 @@ const HuffmanEntry = struct {
     bit_len: u8,
 };
 
-// All 257 entries from RFC 7541 Appendix B
+// All 257 entries from RFC 7541 Appendix B — verified against the RFC.
 const huffman_table = [257]HuffmanEntry{
     .{ .symbol = 0, .code = 0x1ff8, .bit_len = 13 },
     .{ .symbol = 1, .code = 0x7fffd8, .bit_len = 23 },
@@ -40,16 +40,16 @@ const huffman_table = [257]HuffmanEntry{
     .{ .symbol = 19, .code = 0xffffff0, .bit_len = 28 },
     .{ .symbol = 20, .code = 0xffffff1, .bit_len = 28 },
     .{ .symbol = 21, .code = 0xffffff2, .bit_len = 28 },
-    .{ .symbol = 22, .code = 0xffffff3, .bit_len = 28 },
-    .{ .symbol = 23, .code = 0xffffff4, .bit_len = 28 },
-    .{ .symbol = 24, .code = 0xffffff5, .bit_len = 28 },
-    .{ .symbol = 25, .code = 0xffffff6, .bit_len = 28 },
-    .{ .symbol = 26, .code = 0xffffff7, .bit_len = 28 },
-    .{ .symbol = 27, .code = 0xffffff8, .bit_len = 28 },
-    .{ .symbol = 28, .code = 0xffffff9, .bit_len = 28 },
-    .{ .symbol = 29, .code = 0xffffffa, .bit_len = 28 },
-    .{ .symbol = 30, .code = 0xffffffb, .bit_len = 28 },
-    .{ .symbol = 31, .code = 0xffffffc, .bit_len = 28 },
+    .{ .symbol = 22, .code = 0x3ffffffe, .bit_len = 30 },
+    .{ .symbol = 23, .code = 0xffffff3, .bit_len = 28 },
+    .{ .symbol = 24, .code = 0xffffff4, .bit_len = 28 },
+    .{ .symbol = 25, .code = 0xffffff5, .bit_len = 28 },
+    .{ .symbol = 26, .code = 0xffffff6, .bit_len = 28 },
+    .{ .symbol = 27, .code = 0xffffff7, .bit_len = 28 },
+    .{ .symbol = 28, .code = 0xffffff8, .bit_len = 28 },
+    .{ .symbol = 29, .code = 0xffffff9, .bit_len = 28 },
+    .{ .symbol = 30, .code = 0xffffffa, .bit_len = 28 },
+    .{ .symbol = 31, .code = 0xffffffb, .bit_len = 28 },
     .{ .symbol = 32, .code = 0x14, .bit_len = 6 },
     .{ .symbol = 33, .code = 0x3f8, .bit_len = 10 },
     .{ .symbol = 34, .code = 0x3f9, .bit_len = 10 },
@@ -145,136 +145,136 @@ const huffman_table = [257]HuffmanEntry{
     .{ .symbol = 124, .code = 0x7fc, .bit_len = 11 },
     .{ .symbol = 125, .code = 0x3ffd, .bit_len = 14 },
     .{ .symbol = 126, .code = 0x1ffd, .bit_len = 13 },
-    .{ .symbol = 127, .code = 0xffffffd, .bit_len = 28 },
-    .{ .symbol = 128, .code = 0xfffe0, .bit_len = 20 },
-    .{ .symbol = 129, .code = 0xfffe1, .bit_len = 20 },
-    .{ .symbol = 130, .code = 0xfffe2, .bit_len = 20 },
-    .{ .symbol = 131, .code = 0xfffe3, .bit_len = 20 },
-    .{ .symbol = 132, .code = 0xfffe4, .bit_len = 20 },
-    .{ .symbol = 133, .code = 0xfffe5, .bit_len = 20 },
-    .{ .symbol = 134, .code = 0xfffe6, .bit_len = 20 },
-    .{ .symbol = 135, .code = 0xfffe7, .bit_len = 20 },
-    .{ .symbol = 136, .code = 0xfffe8, .bit_len = 20 },
-    .{ .symbol = 137, .code = 0xfffe9, .bit_len = 20 },
-    .{ .symbol = 138, .code = 0xfffea, .bit_len = 20 },
-    .{ .symbol = 139, .code = 0xfffeb, .bit_len = 20 },
-    .{ .symbol = 140, .code = 0xfffec, .bit_len = 20 },
-    .{ .symbol = 141, .code = 0xfffed, .bit_len = 20 },
-    .{ .symbol = 142, .code = 0xfffee, .bit_len = 20 },
-    .{ .symbol = 143, .code = 0xfffef, .bit_len = 20 },
-    .{ .symbol = 144, .code = 0xffff0, .bit_len = 20 },
-    .{ .symbol = 145, .code = 0xffff1, .bit_len = 20 },
-    .{ .symbol = 146, .code = 0xffff2, .bit_len = 20 },
-    .{ .symbol = 147, .code = 0xffff3, .bit_len = 20 },
-    .{ .symbol = 148, .code = 0xffff4, .bit_len = 20 },
-    .{ .symbol = 149, .code = 0xffff5, .bit_len = 20 },
-    .{ .symbol = 150, .code = 0xffff6, .bit_len = 20 },
-    .{ .symbol = 151, .code = 0xffff7, .bit_len = 20 },
-    .{ .symbol = 152, .code = 0xffff8, .bit_len = 20 },
-    .{ .symbol = 153, .code = 0xffff9, .bit_len = 20 },
-    .{ .symbol = 154, .code = 0xffffa, .bit_len = 20 },
-    .{ .symbol = 155, .code = 0xffffb, .bit_len = 20 },
-    .{ .symbol = 156, .code = 0xffffc, .bit_len = 20 },
-    .{ .symbol = 157, .code = 0xffffd, .bit_len = 20 },
-    .{ .symbol = 158, .code = 0xffffe, .bit_len = 20 },
-    .{ .symbol = 159, .code = 0xfffff, .bit_len = 20 },
-    .{ .symbol = 160, .code = 0x100000, .bit_len = 21 },
-    .{ .symbol = 161, .code = 0x100001, .bit_len = 21 },
-    .{ .symbol = 162, .code = 0x100002, .bit_len = 21 },
-    .{ .symbol = 163, .code = 0x100003, .bit_len = 21 },
-    .{ .symbol = 164, .code = 0x100004, .bit_len = 21 },
-    .{ .symbol = 165, .code = 0x100005, .bit_len = 21 },
-    .{ .symbol = 166, .code = 0x100006, .bit_len = 21 },
-    .{ .symbol = 167, .code = 0x100007, .bit_len = 21 },
-    .{ .symbol = 168, .code = 0x100008, .bit_len = 21 },
-    .{ .symbol = 169, .code = 0x100009, .bit_len = 21 },
-    .{ .symbol = 170, .code = 0x10000a, .bit_len = 21 },
-    .{ .symbol = 171, .code = 0x10000b, .bit_len = 21 },
-    .{ .symbol = 172, .code = 0x10000c, .bit_len = 21 },
-    .{ .symbol = 173, .code = 0x10000d, .bit_len = 21 },
-    .{ .symbol = 174, .code = 0x10000e, .bit_len = 21 },
-    .{ .symbol = 175, .code = 0x10000f, .bit_len = 21 },
-    .{ .symbol = 176, .code = 0x100010, .bit_len = 21 },
-    .{ .symbol = 177, .code = 0x100011, .bit_len = 21 },
-    .{ .symbol = 178, .code = 0x100012, .bit_len = 21 },
-    .{ .symbol = 179, .code = 0x100013, .bit_len = 21 },
-    .{ .symbol = 180, .code = 0x100014, .bit_len = 21 },
-    .{ .symbol = 181, .code = 0x100015, .bit_len = 21 },
-    .{ .symbol = 182, .code = 0x100016, .bit_len = 21 },
-    .{ .symbol = 183, .code = 0x100017, .bit_len = 21 },
-    .{ .symbol = 184, .code = 0x100018, .bit_len = 21 },
-    .{ .symbol = 185, .code = 0x100019, .bit_len = 21 },
-    .{ .symbol = 186, .code = 0x10001a, .bit_len = 21 },
-    .{ .symbol = 187, .code = 0x10001b, .bit_len = 21 },
-    .{ .symbol = 188, .code = 0x10001c, .bit_len = 21 },
-    .{ .symbol = 189, .code = 0x10001d, .bit_len = 21 },
-    .{ .symbol = 190, .code = 0x10001e, .bit_len = 21 },
-    .{ .symbol = 191, .code = 0x10001f, .bit_len = 21 },
-    .{ .symbol = 192, .code = 0x100020, .bit_len = 21 },
-    .{ .symbol = 193, .code = 0x100021, .bit_len = 21 },
-    .{ .symbol = 194, .code = 0x100022, .bit_len = 21 },
-    .{ .symbol = 195, .code = 0x100023, .bit_len = 21 },
-    .{ .symbol = 196, .code = 0x100024, .bit_len = 21 },
-    .{ .symbol = 197, .code = 0x100025, .bit_len = 21 },
-    .{ .symbol = 198, .code = 0x100026, .bit_len = 21 },
-    .{ .symbol = 199, .code = 0x100027, .bit_len = 21 },
-    .{ .symbol = 200, .code = 0x100028, .bit_len = 21 },
-    .{ .symbol = 201, .code = 0x100029, .bit_len = 21 },
-    .{ .symbol = 202, .code = 0x10002a, .bit_len = 21 },
-    .{ .symbol = 203, .code = 0x10002b, .bit_len = 21 },
-    .{ .symbol = 204, .code = 0x10002c, .bit_len = 21 },
-    .{ .symbol = 205, .code = 0x10002d, .bit_len = 21 },
-    .{ .symbol = 206, .code = 0x10002e, .bit_len = 21 },
-    .{ .symbol = 207, .code = 0x10002f, .bit_len = 21 },
-    .{ .symbol = 208, .code = 0x100030, .bit_len = 21 },
-    .{ .symbol = 209, .code = 0x100031, .bit_len = 21 },
-    .{ .symbol = 210, .code = 0x100032, .bit_len = 21 },
-    .{ .symbol = 211, .code = 0x100033, .bit_len = 21 },
-    .{ .symbol = 212, .code = 0x100034, .bit_len = 21 },
-    .{ .symbol = 213, .code = 0x100035, .bit_len = 21 },
-    .{ .symbol = 214, .code = 0x100036, .bit_len = 21 },
-    .{ .symbol = 215, .code = 0x100037, .bit_len = 21 },
-    .{ .symbol = 216, .code = 0x100038, .bit_len = 21 },
-    .{ .symbol = 217, .code = 0x100039, .bit_len = 21 },
-    .{ .symbol = 218, .code = 0x10003a, .bit_len = 21 },
-    .{ .symbol = 219, .code = 0x10003b, .bit_len = 21 },
-    .{ .symbol = 220, .code = 0x10003c, .bit_len = 21 },
-    .{ .symbol = 221, .code = 0x10003d, .bit_len = 21 },
-    .{ .symbol = 222, .code = 0x10003e, .bit_len = 21 },
-    .{ .symbol = 223, .code = 0x10003f, .bit_len = 21 },
-    .{ .symbol = 224, .code = 0x100040, .bit_len = 21 },
-    .{ .symbol = 225, .code = 0x100041, .bit_len = 21 },
-    .{ .symbol = 226, .code = 0x100042, .bit_len = 21 },
-    .{ .symbol = 227, .code = 0x100043, .bit_len = 21 },
-    .{ .symbol = 228, .code = 0x100044, .bit_len = 21 },
-    .{ .symbol = 229, .code = 0x100045, .bit_len = 21 },
-    .{ .symbol = 230, .code = 0x100046, .bit_len = 21 },
-    .{ .symbol = 231, .code = 0x100047, .bit_len = 21 },
-    .{ .symbol = 232, .code = 0x100048, .bit_len = 21 },
-    .{ .symbol = 233, .code = 0x100049, .bit_len = 21 },
-    .{ .symbol = 234, .code = 0x10004a, .bit_len = 21 },
-    .{ .symbol = 235, .code = 0x10004b, .bit_len = 21 },
-    .{ .symbol = 236, .code = 0x10004c, .bit_len = 21 },
-    .{ .symbol = 237, .code = 0x10004d, .bit_len = 21 },
-    .{ .symbol = 238, .code = 0x10004e, .bit_len = 21 },
-    .{ .symbol = 239, .code = 0x10004f, .bit_len = 21 },
-    .{ .symbol = 240, .code = 0x100050, .bit_len = 21 },
-    .{ .symbol = 241, .code = 0x100051, .bit_len = 21 },
-    .{ .symbol = 242, .code = 0x100052, .bit_len = 21 },
-    .{ .symbol = 243, .code = 0x100053, .bit_len = 21 },
-    .{ .symbol = 244, .code = 0x100054, .bit_len = 21 },
-    .{ .symbol = 245, .code = 0x100055, .bit_len = 21 },
-    .{ .symbol = 246, .code = 0x100056, .bit_len = 21 },
-    .{ .symbol = 247, .code = 0x100057, .bit_len = 21 },
-    .{ .symbol = 248, .code = 0x100058, .bit_len = 21 },
-    .{ .symbol = 249, .code = 0x100059, .bit_len = 21 },
-    .{ .symbol = 250, .code = 0x10005a, .bit_len = 21 },
-    .{ .symbol = 251, .code = 0x10005b, .bit_len = 21 },
-    .{ .symbol = 252, .code = 0x10005c, .bit_len = 21 },
-    .{ .symbol = 253, .code = 0x10005d, .bit_len = 21 },
-    .{ .symbol = 254, .code = 0x10005e, .bit_len = 21 },
-    .{ .symbol = 255, .code = 0x10005f, .bit_len = 21 },
-    .{ .symbol = 256, .code = 0x3ffffffe, .bit_len = 30 }, // EOS
+    .{ .symbol = 127, .code = 0xffffffc, .bit_len = 28 },
+    .{ .symbol = 128, .code = 0xfffe6, .bit_len = 20 },
+    .{ .symbol = 129, .code = 0x3fffd2, .bit_len = 22 },
+    .{ .symbol = 130, .code = 0xfffe7, .bit_len = 20 },
+    .{ .symbol = 131, .code = 0xfffe8, .bit_len = 20 },
+    .{ .symbol = 132, .code = 0x3fffd3, .bit_len = 22 },
+    .{ .symbol = 133, .code = 0x3fffd4, .bit_len = 22 },
+    .{ .symbol = 134, .code = 0x3fffd5, .bit_len = 22 },
+    .{ .symbol = 135, .code = 0x7fffd9, .bit_len = 23 },
+    .{ .symbol = 136, .code = 0x3fffd6, .bit_len = 22 },
+    .{ .symbol = 137, .code = 0x7fffda, .bit_len = 23 },
+    .{ .symbol = 138, .code = 0x7fffdb, .bit_len = 23 },
+    .{ .symbol = 139, .code = 0x7fffdc, .bit_len = 23 },
+    .{ .symbol = 140, .code = 0x7fffdd, .bit_len = 23 },
+    .{ .symbol = 141, .code = 0x7fffde, .bit_len = 23 },
+    .{ .symbol = 142, .code = 0xffffeb, .bit_len = 24 },
+    .{ .symbol = 143, .code = 0x7fffdf, .bit_len = 23 },
+    .{ .symbol = 144, .code = 0xffffec, .bit_len = 24 },
+    .{ .symbol = 145, .code = 0xffffed, .bit_len = 24 },
+    .{ .symbol = 146, .code = 0x3fffd7, .bit_len = 22 },
+    .{ .symbol = 147, .code = 0x7fffe0, .bit_len = 23 },
+    .{ .symbol = 148, .code = 0xffffee, .bit_len = 24 },
+    .{ .symbol = 149, .code = 0x7fffe1, .bit_len = 23 },
+    .{ .symbol = 150, .code = 0x7fffe2, .bit_len = 23 },
+    .{ .symbol = 151, .code = 0x7fffe3, .bit_len = 23 },
+    .{ .symbol = 152, .code = 0x7fffe4, .bit_len = 23 },
+    .{ .symbol = 153, .code = 0x1fffdc, .bit_len = 21 },
+    .{ .symbol = 154, .code = 0x3fffd8, .bit_len = 22 },
+    .{ .symbol = 155, .code = 0x7fffe5, .bit_len = 23 },
+    .{ .symbol = 156, .code = 0x3fffd9, .bit_len = 22 },
+    .{ .symbol = 157, .code = 0x7fffe6, .bit_len = 23 },
+    .{ .symbol = 158, .code = 0x7fffe7, .bit_len = 23 },
+    .{ .symbol = 159, .code = 0xffffef, .bit_len = 24 },
+    .{ .symbol = 160, .code = 0x3fffda, .bit_len = 22 },
+    .{ .symbol = 161, .code = 0x1fffdd, .bit_len = 21 },
+    .{ .symbol = 162, .code = 0xfffe9, .bit_len = 20 },
+    .{ .symbol = 163, .code = 0x3fffdb, .bit_len = 22 },
+    .{ .symbol = 164, .code = 0x3fffdc, .bit_len = 22 },
+    .{ .symbol = 165, .code = 0x7fffe8, .bit_len = 23 },
+    .{ .symbol = 166, .code = 0x7fffe9, .bit_len = 23 },
+    .{ .symbol = 167, .code = 0x1fffde, .bit_len = 21 },
+    .{ .symbol = 168, .code = 0x7fffea, .bit_len = 23 },
+    .{ .symbol = 169, .code = 0x3fffdd, .bit_len = 22 },
+    .{ .symbol = 170, .code = 0x3fffde, .bit_len = 22 },
+    .{ .symbol = 171, .code = 0xfffff0, .bit_len = 24 },
+    .{ .symbol = 172, .code = 0x1fffdf, .bit_len = 21 },
+    .{ .symbol = 173, .code = 0x3fffdf, .bit_len = 22 },
+    .{ .symbol = 174, .code = 0x7fffeb, .bit_len = 23 },
+    .{ .symbol = 175, .code = 0x7fffec, .bit_len = 23 },
+    .{ .symbol = 176, .code = 0x1fffe0, .bit_len = 21 },
+    .{ .symbol = 177, .code = 0x1fffe1, .bit_len = 21 },
+    .{ .symbol = 178, .code = 0x3fffe0, .bit_len = 22 },
+    .{ .symbol = 179, .code = 0x1fffe2, .bit_len = 21 },
+    .{ .symbol = 180, .code = 0x7fffed, .bit_len = 23 },
+    .{ .symbol = 181, .code = 0x3fffe1, .bit_len = 22 },
+    .{ .symbol = 182, .code = 0x7fffee, .bit_len = 23 },
+    .{ .symbol = 183, .code = 0x7fffef, .bit_len = 23 },
+    .{ .symbol = 184, .code = 0xfffea, .bit_len = 20 },
+    .{ .symbol = 185, .code = 0x3fffe2, .bit_len = 22 },
+    .{ .symbol = 186, .code = 0x3fffe3, .bit_len = 22 },
+    .{ .symbol = 187, .code = 0x3fffe4, .bit_len = 22 },
+    .{ .symbol = 188, .code = 0x7ffff0, .bit_len = 23 },
+    .{ .symbol = 189, .code = 0x3fffe5, .bit_len = 22 },
+    .{ .symbol = 190, .code = 0x3fffe6, .bit_len = 22 },
+    .{ .symbol = 191, .code = 0x7ffff1, .bit_len = 23 },
+    .{ .symbol = 192, .code = 0x3ffffe0, .bit_len = 26 },
+    .{ .symbol = 193, .code = 0x3ffffe1, .bit_len = 26 },
+    .{ .symbol = 194, .code = 0xfffeb, .bit_len = 20 },
+    .{ .symbol = 195, .code = 0x7fff1, .bit_len = 19 },
+    .{ .symbol = 196, .code = 0x3fffe7, .bit_len = 22 },
+    .{ .symbol = 197, .code = 0x7ffff2, .bit_len = 23 },
+    .{ .symbol = 198, .code = 0x3fffe8, .bit_len = 22 },
+    .{ .symbol = 199, .code = 0x1ffffec, .bit_len = 25 },
+    .{ .symbol = 200, .code = 0x3ffffe2, .bit_len = 26 },
+    .{ .symbol = 201, .code = 0x3ffffe3, .bit_len = 26 },
+    .{ .symbol = 202, .code = 0x3ffffe4, .bit_len = 26 },
+    .{ .symbol = 203, .code = 0x7ffffde, .bit_len = 27 },
+    .{ .symbol = 204, .code = 0x7ffffdf, .bit_len = 27 },
+    .{ .symbol = 205, .code = 0x3ffffe5, .bit_len = 26 },
+    .{ .symbol = 206, .code = 0xfffff1, .bit_len = 24 },
+    .{ .symbol = 207, .code = 0x1ffffed, .bit_len = 25 },
+    .{ .symbol = 208, .code = 0x7fff2, .bit_len = 19 },
+    .{ .symbol = 209, .code = 0x1fffe3, .bit_len = 21 },
+    .{ .symbol = 210, .code = 0x3ffffe6, .bit_len = 26 },
+    .{ .symbol = 211, .code = 0x7ffffe0, .bit_len = 27 },
+    .{ .symbol = 212, .code = 0x7ffffe1, .bit_len = 27 },
+    .{ .symbol = 213, .code = 0x3ffffe7, .bit_len = 26 },
+    .{ .symbol = 214, .code = 0x7ffffe2, .bit_len = 27 },
+    .{ .symbol = 215, .code = 0xfffff2, .bit_len = 24 },
+    .{ .symbol = 216, .code = 0x1fffe4, .bit_len = 21 },
+    .{ .symbol = 217, .code = 0x1fffe5, .bit_len = 21 },
+    .{ .symbol = 218, .code = 0x3ffffe8, .bit_len = 26 },
+    .{ .symbol = 219, .code = 0x3ffffe9, .bit_len = 26 },
+    .{ .symbol = 220, .code = 0xffffffd, .bit_len = 28 },
+    .{ .symbol = 221, .code = 0x7ffffe3, .bit_len = 27 },
+    .{ .symbol = 222, .code = 0x7ffffe4, .bit_len = 27 },
+    .{ .symbol = 223, .code = 0x7ffffe5, .bit_len = 27 },
+    .{ .symbol = 224, .code = 0xfffec, .bit_len = 20 },
+    .{ .symbol = 225, .code = 0xfffff3, .bit_len = 24 },
+    .{ .symbol = 226, .code = 0xfffed, .bit_len = 20 },
+    .{ .symbol = 227, .code = 0x1fffe6, .bit_len = 21 },
+    .{ .symbol = 228, .code = 0x3fffe9, .bit_len = 22 },
+    .{ .symbol = 229, .code = 0x1fffe7, .bit_len = 21 },
+    .{ .symbol = 230, .code = 0x1fffe8, .bit_len = 21 },
+    .{ .symbol = 231, .code = 0x7ffff3, .bit_len = 23 },
+    .{ .symbol = 232, .code = 0x3fffea, .bit_len = 22 },
+    .{ .symbol = 233, .code = 0x3fffeb, .bit_len = 22 },
+    .{ .symbol = 234, .code = 0x1ffffee, .bit_len = 25 },
+    .{ .symbol = 235, .code = 0x1ffffef, .bit_len = 25 },
+    .{ .symbol = 236, .code = 0xfffff4, .bit_len = 24 },
+    .{ .symbol = 237, .code = 0xfffff5, .bit_len = 24 },
+    .{ .symbol = 238, .code = 0x3ffffea, .bit_len = 26 },
+    .{ .symbol = 239, .code = 0x7ffff4, .bit_len = 23 },
+    .{ .symbol = 240, .code = 0x3ffffeb, .bit_len = 26 },
+    .{ .symbol = 241, .code = 0x7ffffe6, .bit_len = 27 },
+    .{ .symbol = 242, .code = 0x3ffffec, .bit_len = 26 },
+    .{ .symbol = 243, .code = 0x3ffffed, .bit_len = 26 },
+    .{ .symbol = 244, .code = 0x7ffffe7, .bit_len = 27 },
+    .{ .symbol = 245, .code = 0x7ffffe8, .bit_len = 27 },
+    .{ .symbol = 246, .code = 0x7ffffe9, .bit_len = 27 },
+    .{ .symbol = 247, .code = 0x7ffffea, .bit_len = 27 },
+    .{ .symbol = 248, .code = 0x7ffffeb, .bit_len = 27 },
+    .{ .symbol = 249, .code = 0xffffffe, .bit_len = 28 },
+    .{ .symbol = 250, .code = 0x7ffffec, .bit_len = 27 },
+    .{ .symbol = 251, .code = 0x7ffffed, .bit_len = 27 },
+    .{ .symbol = 252, .code = 0x7ffffee, .bit_len = 27 },
+    .{ .symbol = 253, .code = 0x7ffffef, .bit_len = 27 },
+    .{ .symbol = 254, .code = 0x7fffff0, .bit_len = 27 },
+    .{ .symbol = 255, .code = 0x3ffffee, .bit_len = 26 },
+    .{ .symbol = 256, .code = 0x3fffffff, .bit_len = 30 }, // EOS
 };
 
 // Maximum number of trie nodes. Huffman codes range from 5 to 30 bits.
@@ -627,4 +627,94 @@ test "encode www.example.com matches RFC" {
     const expected = [_]u8{ 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff };
     try testing.expectEqual(expected.len, enc_len);
     try testing.expectEqualSlices(u8, &expected, enc_buf[0..enc_len]);
+}
+
+// ── Adversarial tests (RFC 7541 §5.2) ─────────────────────────────────
+
+// 30 consecutive 1-bits form the EOS code (0x3fffffff). RFC 7541 §5.2
+// requires the decoder to reject EOS in encoded data (either as a decoded
+// symbol or as over-long padding).
+test "decode rejects long run of 1-bits (EOS region)" {
+    const encoded = [_]u8{ 0xff, 0xff, 0xff, 0xff };
+    var out: [64]u8 = undefined;
+    const result = decode(&encoded, &out);
+    try testing.expect(std.meta.isError(result));
+}
+
+// Padding bits must all be 1s (MSBs of EOS code per RFC 7541 §5.2).
+// Valid 'a' = 00011 (5 bits). Trailing 101 cannot be all-1s padding.
+test "decode rejects padding with 0 bit in trailing" {
+    // 'a' (00011) + padding "101" → 0b00011101 = 0x1d.
+    const encoded = [_]u8{0x1d};
+    var out: [16]u8 = undefined;
+    try testing.expectError(DecodeError.InvalidPadding, decode(&encoded, &out));
+}
+
+// Truncation mid-symbol with non-all-1s trailing bits must be rejected.
+// 'A' = 0x21 (7 bits, code 0100001). One byte starting with that prefix
+// followed by a 0-bit padding is invalid per RFC 7541 §5.2.
+test "decode rejects non-all-1s trailing bits" {
+    // 'A' code = 0100001 (7 bits) + padding '0' → 01000010 = 0x42
+    const encoded = [_]u8{0x42};
+    var out: [16]u8 = undefined;
+    const result = decode(&encoded, &out);
+    try testing.expect(std.meta.isError(result));
+}
+
+// All-zeros input decodes to many copies of the shortest symbol ('0' = 0x0, 5 bits).
+// One byte = 8 bits: decodes '0' (5 bits), leaves "000" trailing which is not all-1s.
+test "decode rejects all-zeros input" {
+    const encoded = [_]u8{0x00};
+    var out: [16]u8 = undefined;
+    try testing.expectError(DecodeError.InvalidPadding, decode(&encoded, &out));
+}
+
+// Output buffer exactly zero-sized with non-empty input: first symbol can't fit.
+test "decode zero-sized output buffer rejects non-empty input" {
+    // '0' = 0x00000111 = 0x07 with padding
+    const encoded = [_]u8{0x07};
+    var out: [0]u8 = undefined;
+    try testing.expectError(DecodeError.OutputBufferTooSmall, decode(&encoded, &out));
+}
+
+// Encoder must refuse an output buffer that cannot hold the padded final byte.
+test "encode rejects undersized output buffer" {
+    // "aaa" = 3×5 = 15 bits → 2 bytes after padding. Give 1 byte.
+    var enc_buf: [1]u8 = undefined;
+    try testing.expectError(DecodeError.OutputBufferTooSmall, encode("aaa", &enc_buf));
+}
+
+// RFC 7541 Appendix B: SYN (symbol 22) is encoded as the 30-bit code
+// 0x3ffffffe. EOS (symbol 256) is encoded as 0x3fffffff (30 bits all 1s).
+// Encode+decode a byte containing SYN to verify the codec uses the
+// correct RFC values.
+test "encode+decode SYN (symbol 22) matches RFC 7541" {
+    const input = [_]u8{22};
+    var enc_buf: [8]u8 = undefined;
+    const enc_len = try encode(&input, &enc_buf);
+    // 30 bits of code + 2 bits of 1s padding = 32 bits = 4 bytes.
+    try testing.expectEqual(@as(usize, 4), enc_len);
+
+    var dec_buf: [4]u8 = undefined;
+    const dec_len = try decode(enc_buf[0..enc_len], &dec_buf);
+    try testing.expectEqual(@as(usize, 1), dec_len);
+    try testing.expectEqual(@as(u8, 22), dec_buf[0]);
+}
+
+// Round-trip every byte value 0..255 individually. Catches any remaining
+// table-entry errors — encode(b) → decode == [b].
+test "encode+decode every byte 0..255 round-trips" {
+    var byte: u16 = 0;
+    while (byte < 256) : (byte += 1) {
+        const b: u8 = @intCast(byte);
+        const input = [_]u8{b};
+
+        var enc_buf: [8]u8 = undefined;
+        const enc_len = try encode(&input, &enc_buf);
+
+        var dec_buf: [4]u8 = undefined;
+        const dec_len = try decode(enc_buf[0..enc_len], &dec_buf);
+        try testing.expectEqual(@as(usize, 1), dec_len);
+        try testing.expectEqual(b, dec_buf[0]);
+    }
 }

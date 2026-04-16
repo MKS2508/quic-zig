@@ -616,3 +616,126 @@ test "UniStreamType: write and read" {
     const st = try readUniStreamType(rfbs.reader());
     try testing.expectEqual(UniStreamType.control, st);
 }
+
+// ── Adversarial tests (RFC 9114 §7) ───────────────────────────────────
+
+// All reserved HTTP/2 frame types MUST be rejected (RFC 9114 §7.2.8).
+test "H3Frame: all reserved HTTP/2 frame types rejected" {
+    const reserved = [_]u8{ 0x02, 0x06, 0x08, 0x09 };
+    for (reserved) |t| {
+        var buf: [4]u8 = undefined;
+        var fbs = io.fixedBufferStream(&buf);
+        try packet.writeVarInt(fbs.writer(), t);
+        try packet.writeVarInt(fbs.writer(), 0);
+        try testing.expectError(error.H3FrameUnexpected, parse(fbs.getWritten()));
+    }
+}
+
+// All reserved HTTP/2 SETTINGS identifiers (§7.2.4.1) MUST be rejected.
+test "H3Frame: all reserved HTTP/2 SETTINGS ids rejected" {
+    const reserved_ids = [_]u8{ 0x00, 0x02, 0x03, 0x04, 0x05 };
+    for (reserved_ids) |id| {
+        var buf: [8]u8 = undefined;
+        var fbs = io.fixedBufferStream(&buf);
+        try packet.writeVarInt(fbs.writer(), 0x04); // SETTINGS
+        try packet.writeVarInt(fbs.writer(), 2); // length = 2 bytes (id + value)
+        try packet.writeVarInt(fbs.writer(), id);
+        try packet.writeVarInt(fbs.writer(), 0);
+        try testing.expectError(error.H3SettingsError, parse(fbs.getWritten()));
+    }
+}
+
+// DATA frame with length=0 is structurally valid (empty payload).
+test "H3Frame: zero-length DATA is accepted" {
+    const bytes = [_]u8{ 0x00, 0x00 }; // type=0, length=0
+    const result = try parse(&bytes);
+    try testing.expectEqual(H3FrameType.data, std.meta.activeTag(result.frame));
+    try testing.expectEqual(@as(usize, 0), result.frame.data.len);
+    try testing.expectEqual(@as(usize, 2), result.consumed);
+}
+
+// HEADERS frame with length=0 is accepted (empty QPACK block handled by decoder).
+test "H3Frame: zero-length HEADERS is accepted" {
+    const bytes = [_]u8{ 0x01, 0x00 };
+    const result = try parse(&bytes);
+    try testing.expectEqual(H3FrameType.headers, std.meta.activeTag(result.frame));
+    try testing.expectEqual(@as(usize, 0), result.frame.headers.len);
+}
+
+// CLOSE_WEBTRANSPORT_SESSION payload must be ≥4 bytes (32-bit error code).
+test "H3Frame: CLOSE_WEBTRANSPORT_SESSION with <4 byte payload rejected" {
+    // type = 0x2843 (2-byte varint), length = 3, payload = 3 bytes
+    var buf: [16]u8 = undefined;
+    var fbs = io.fixedBufferStream(&buf);
+    try packet.writeVarInt(fbs.writer(), 0x2843);
+    try packet.writeVarInt(fbs.writer(), 3);
+    try fbs.writer().writeAll(&[_]u8{ 0xaa, 0xbb, 0xcc });
+    try testing.expectError(error.MalformedFrame, parse(fbs.getWritten()));
+}
+
+// CLOSE_WEBTRANSPORT_SESSION with exactly 4 bytes (error code, no reason).
+test "H3Frame: CLOSE_WEBTRANSPORT_SESSION no reason accepted" {
+    var buf: [16]u8 = undefined;
+    var fbs = io.fixedBufferStream(&buf);
+    try packet.writeVarInt(fbs.writer(), 0x2843);
+    try packet.writeVarInt(fbs.writer(), 4);
+    try fbs.writer().writeInt(u32, 0xdeadbeef, .big);
+
+    const result = try parse(fbs.getWritten());
+    try testing.expectEqual(H3FrameType.close_webtransport_session, std.meta.activeTag(result.frame));
+    try testing.expectEqual(@as(u32, 0xdeadbeef), result.frame.close_webtransport_session.error_code);
+    try testing.expectEqualStrings("", result.frame.close_webtransport_session.reason);
+}
+
+// PRIORITY_UPDATE with a truncated stream_id varint inside the payload.
+test "H3Frame: PRIORITY_UPDATE with truncated stream_id rejected" {
+    // type = 0xF0700 (4-byte varint), length = 1, payload = 0xc0
+    // 0xc0 begins an 8-byte varint but only 1 payload byte is present.
+    var buf: [16]u8 = undefined;
+    var fbs = io.fixedBufferStream(&buf);
+    try packet.writeVarInt(fbs.writer(), 0xF0700);
+    try packet.writeVarInt(fbs.writer(), 1);
+    try fbs.writer().writeByte(0xc0);
+    try testing.expectError(error.MalformedFrame, parse(fbs.getWritten()));
+}
+
+// Length field that claims more bytes than available.
+test "H3Frame: length exceeding available bytes rejected" {
+    // DATA type + length = 2^62-1 (max varint). Buffer is tiny.
+    var buf: [16]u8 = undefined;
+    var fbs = io.fixedBufferStream(&buf);
+    try packet.writeVarInt(fbs.writer(), 0x00);
+    try packet.writeVarInt(fbs.writer(), 0x3fffffffffffffff); // 8-byte max varint
+    try testing.expectError(error.BufferTooShort, parse(fbs.getWritten()));
+}
+
+// Multiple GREASE frames before SETTINGS must all be skipped consistently.
+test "H3Frame: multiple sequential GREASE frames all skip" {
+    var buf: [32]u8 = undefined;
+    var fbs = io.fixedBufferStream(&buf);
+    // Three grease frames with varying types and payloads:
+    try packet.writeVarInt(fbs.writer(), 0x1f + 0x21); // 0x40
+    try packet.writeVarInt(fbs.writer(), 0);
+    try packet.writeVarInt(fbs.writer(), 0x1f * 2 + 0x21); // 0x5f
+    try packet.writeVarInt(fbs.writer(), 1);
+    try fbs.writer().writeByte(0xaa);
+    try packet.writeVarInt(fbs.writer(), 0x1f * 3 + 0x21); // 0x7e
+    try packet.writeVarInt(fbs.writer(), 0);
+
+    const written = fbs.getWritten();
+    var offset: usize = 0;
+    var count: usize = 0;
+    while (offset < written.len) {
+        const r = try parse(written[offset..]);
+        try testing.expectEqual(H3FrameType.unknown, std.meta.activeTag(r.frame));
+        offset += r.consumed;
+        count += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), count);
+    try testing.expectEqual(written.len, offset);
+}
+
+// Empty input — must not panic.
+test "H3Frame: empty input returns BufferTooShort" {
+    try testing.expectError(error.BufferTooShort, parse(&[_]u8{}));
+}

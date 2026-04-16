@@ -1385,3 +1385,152 @@ test "QpackEncoder: second encode reuses dynamic table" {
     _ = instr2;
     // The entry is already in dynamic table so no new insert instruction
 }
+
+// ── Adversarial / malformed input tests (RFC 9204) ────────────────────
+
+test "decodeHeaders: truncated prefix" {
+    // Only 1 byte — prefix requires ≥2 bytes (RIC + Delta Base)
+    var decoded: [4]Header = undefined;
+    const r0 = decodeHeaders(&[_]u8{}, &decoded);
+    try testing.expectError(error.BufferTooShort, r0);
+
+    const r1 = decodeHeaders(&[_]u8{0x00}, &decoded);
+    try testing.expectError(error.BufferTooShort, r1);
+}
+
+test "decodeHeaders: invalid static index" {
+    // Indexed static (11NNNNNN) with index 99 is invalid (table is 0..98).
+    // Encoding: prefix 0x00 0x00, then 11_111111 (=0x3f, index 63+continuation)
+    // so we build one directly with a 6-bit value == 99 (valid range end),
+    // and another with 100 (invalid).
+    var decoded: [4]Header = undefined;
+
+    // index = 100: 11 prefix + 6-bit 0x3f=63 + continuation byte 100-63=37
+    const bad = [_]u8{ 0x00, 0x00, 0xff, 37 };
+    try testing.expectError(error.InvalidIndex, decodeHeaders(&bad, &decoded));
+}
+
+test "decodeHeaders: truncated literal value length" {
+    // 001NHNNN literal-with-literal-name: 001_0_0001 name_len=1,
+    // then claim name="x", then value length varint truncated.
+    var decoded: [4]Header = undefined;
+    // 7-bit length prefix continuation marker with no following byte:
+    const bad = [_]u8{ 0x00, 0x00, 0x21, 'x', 0xff };
+    const r = decodeHeaders(&bad, &decoded);
+    try testing.expect(std.meta.isError(r));
+}
+
+test "decodeHeaders: TooManyHeaders when buffer too small" {
+    // Encode 5 headers but decode with a 3-slot buffer.
+    var encode_buf: [256]u8 = undefined;
+    const headers = [_]Header{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = ":status", .value = "200" },
+    };
+    const enc_len = try encodeHeaders(&headers, &encode_buf);
+
+    var decoded: [3]Header = undefined;
+    try testing.expectError(error.TooManyHeaders, decodeHeaders(encode_buf[0..enc_len], &decoded));
+}
+
+test "QpackDecoder: Insert Count Increment of 0 is a stream error" {
+    // RFC 9204 §4.4.3: decoder MUST treat increment=0 as QPACK_DECODER_STREAM_ERROR.
+    // processDecoderInstruction is on the encoder side (it processes messages FROM
+    // the peer's decoder). Instruction 00xxxxxx with value 0 = 0x00.
+    var encoder = QpackEncoder{};
+    try testing.expectError(
+        error.QpackDecoderStreamError,
+        encoder.processDecoderInstruction(&[_]u8{0x00}),
+    );
+}
+
+test "QpackDecoder: Set Capacity above local max is rejected" {
+    var decoder = QpackDecoder{};
+    decoder.setCapacity(1024); // local max = 1024
+
+    // Encoder instruction "Set Dynamic Table Capacity" with value 2048:
+    // 001 prefix, 5-bit prefix = 31 marker, then continuation for 2048-31=2017.
+    var buf: [16]u8 = undefined;
+    var pos: usize = 0;
+    encodeInteger(&buf, &pos, 2048, 5, 0x20);
+
+    try testing.expectError(
+        error.CapacityExceeded,
+        decoder.processEncoderInstruction(buf[0..pos]),
+    );
+}
+
+test "QpackDecoder: invalid dynamic name reference" {
+    // Decoder with empty dynamic table. Encode a field-line that references
+    // dynamic-name index 0 (which doesn't exist).
+    var decoder = QpackDecoder{};
+    decoder.setCapacity(4096);
+
+    // Prefix: RIC=1 (encoded via encodeRIC), Delta Base=0. We need a block
+    // whose RIC decode advances past the table. Forge a block claiming RIC=0
+    // (so dynamic refs fail), then literal-with-dynamic-name-ref (01N0NNNN),
+    // index 0, value="x".
+    // bytes: 0x00 (RIC=0), 0x00 (delta base=0), 0x40 (01 000000 → dynamic ref idx 0),
+    // then value string: 0x01 'x'
+    const bad = [_]u8{ 0x00, 0x00, 0x40, 0x01, 'x' };
+    var out: [4]Header = undefined;
+    try testing.expectError(error.InvalidIndex, decoder.decode(&bad, &out, 0));
+}
+
+test "decodeHeaders: empty block (prefix only)" {
+    // Valid: RIC=0, Delta Base=0, no fields → 0 headers.
+    var decoded: [4]Header = undefined;
+    const count = try decodeHeaders(&[_]u8{ 0x00, 0x00 }, &decoded);
+    try testing.expectEqual(@as(usize, 0), count);
+}
+
+test "decodeHeaders: literal with zero-length name and value" {
+    // 001_0_0000 → literal name, H=0, name_len=0; then value length=0.
+    // Encoded: prefix (00,00) + 0x20 (literal name, len=0) + 0x00 (value len=0).
+    var decoded: [4]Header = undefined;
+    const input = [_]u8{ 0x00, 0x00, 0x20, 0x00 };
+    const count = try decodeHeaders(&input, &decoded);
+    try testing.expectEqual(@as(usize, 1), count);
+    try testing.expectEqualStrings("", decoded[0].name);
+    try testing.expectEqualStrings("", decoded[0].value);
+}
+
+test "DynamicTable: setCapacity(0) evicts everything" {
+    var dt = DynamicTable{};
+    dt.setCapacity(4096);
+    try dt.insert(":authority", "example.com");
+    try dt.insert("user-agent", "quic-zig/1.0");
+    try testing.expectEqual(@as(usize, 2), dt.count);
+
+    dt.setCapacity(0);
+    try testing.expectEqual(@as(usize, 0), dt.count);
+    try testing.expectEqual(@as(usize, 0), dt.size);
+}
+
+test "DynamicTable: insert entry larger than capacity fails" {
+    var dt = DynamicTable{};
+    dt.setCapacity(64); // small
+
+    // 50-byte name+value+32 = 82 > 64 → EntryTooLarge
+    const big_name = "x" ** 40;
+    try testing.expectError(
+        error.EntryTooLarge,
+        dt.insert(big_name, "value"),
+    );
+}
+
+test "DynamicTable: insert rejects over-long name/value" {
+    var dt = DynamicTable{};
+    dt.setCapacity(100000);
+
+    // name > 128 bytes
+    const huge_name = "x" ** 200;
+    try testing.expectError(error.NameTooLong, dt.insert(huge_name, "v"));
+
+    // value > 512 bytes
+    const huge_value = "v" ** 600;
+    try testing.expectError(error.ValueTooLong, dt.insert("name", huge_value));
+}

@@ -383,6 +383,16 @@ No remaining work — all sections implemented. Optional improvements:
 - Stream blocking support (qpack_blocked_streams > 0)
 - Conservative insertion heuristics for large header values
 
+**Huffman table history (Apr 2026):** the RFC 7541 Appendix B table in
+`src/h3/huffman.zig` was originally incorrect for ~130 symbols (22-31,
+127, 128-256 including EOS). Zig↔Zig interop was unaffected because the
+table was self-consistent; cross-impl interop silently corrupted any
+Huffman-encoded header value containing bytes ≥128 or a handful of
+control characters. Surfaced while writing RFC 9114 adversarial tests,
+fixed by transcribing Appendix B. Regression tests: per-byte round-trip
+(`encode+decode every byte 0..255 round-trips`) and a quic-go
+cross-impl byte-exact UTF-8 header check.
+
 ---
 
 ## RFC 9297 — HTTP Datagrams and the Capsule Protocol
