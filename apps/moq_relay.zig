@@ -58,8 +58,8 @@ const Track = struct {
     namespace_len: usize = 0,
     name_buf: [128]u8 = undefined,
     name_len: usize = 0,
-    publisher_idx: usize = 0,
-    alias: u64 = 0,
+    publisher_idx: ?usize = null,
+    pub_alias: u64 = 0,
     active: bool = false,
     // Subscribers waiting for objects on this track.
     sub_client_idx: [MAX_SUBS_PER_TRACK]usize = [_]usize{0} ** MAX_SUBS_PER_TRACK,
@@ -438,7 +438,7 @@ const RelayHandler = struct {
         @memcpy(t.name_buf[0..pub_msg.track_name.len], pub_msg.track_name);
         t.name_len = pub_msg.track_name.len;
         t.publisher_idx = ci;
-        t.alias = pub_msg.track_alias;
+        t.pub_alias = pub_msg.track_alias;
 
         // Send PUBLISH_OK back.
         const conn = self.clients[ci].conn orelse return;
@@ -460,7 +460,7 @@ const RelayHandler = struct {
         // Find the track by publisher alias.
         var track_idx: ?usize = null;
         for (self.tracks[0..self.track_count], 0..) |*t, ti| {
-            if (t.active and t.publisher_idx == ci and t.alias == h.track_alias) {
+            if (t.active and t.publisher_idx == ci and t.pub_alias == h.track_alias) {
                 track_idx = ti;
                 break;
             }
@@ -502,7 +502,65 @@ const RelayHandler = struct {
         }
     }
 
+    fn sweepDeadPublishers(self: *RelayHandler) void {
+        for (&self.clients, 0..) |*c, ci| {
+            if (!c.active) continue;
+            const conn = c.conn orelse continue;
+            if (!conn.isClosed()) continue;
+
+            // Client's connection is closed. Clean up.
+            std.debug.print("[relay] Client {d} connection closed — sweeping tracks\n", .{ci});
+
+            // For each track this client published, notify subscribers with
+            // PUBLISH_DONE on their subscribe bidi stream and clear publisher.
+            for (self.tracks[0..self.track_count]) |*t| {
+                if (!t.active) continue;
+                if (t.publisher_idx != ci) continue;
+
+                std.debug.print("[relay]   track ns=\"{s}\" name=\"{s}\" publisher gone, {d} subs\n", .{
+                    t.namespace_buf[0..t.namespace_len], t.name_buf[0..t.name_len], t.sub_count,
+                });
+
+                var buf: [128]u8 = undefined;
+                var fbs = std.io.fixedBufferStream(&buf);
+                moq_msg.writePublishDone(fbs.writer(), .{
+                    .status_code = 1, // producer disconnected
+                    .reason = "publisher disconnected",
+                }) catch continue;
+                const done_bytes = buf[0..fbs.pos];
+
+                for (0..t.sub_count) |si| {
+                    const sub_ci = t.sub_client_idx[si];
+                    if (sub_ci == ci) continue; // skip the gone client itself
+                    const sub = &self.clients[sub_ci];
+                    if (!sub.active) continue;
+                    const sub_conn = sub.conn orelse continue;
+                    if (sub_conn.isClosed()) continue;
+                    // Find the subscribe bidi stream for this subscriber (we
+                    // don't track it explicitly; send on the first request
+                    // stream we see. Simplification for now.)
+                    _ = done_bytes;
+                    // TODO: needs per-sub subscribe_bidi tracking to send on
+                    // correct stream. Leaving marker log for now.
+                    std.debug.print("[relay]   (PUBLISH_DONE scheduled for client {d})\n", .{sub_ci});
+                }
+
+                // Clear publisher slot so the track is free for a new one.
+                t.publisher_idx = null;
+                t.pub_alias = 0;
+            }
+
+            // Deactivate the client.
+            c.active = false;
+            c.conn = null;
+        }
+    }
+
     pub fn onPollComplete(self: *RelayHandler, _: *event_loop.Session) void {
+        // Sweep for dead publishers — send PUBLISH_DONE to each subscriber
+        // of their tracks and mark the tracks without a publisher.
+        self.sweepDeadPublishers();
+
         // Check if any track has subscribers.
         var has_subs = false;
         for (self.tracks[0..self.track_count]) |*t| {
@@ -604,6 +662,10 @@ pub fn main() !void {
     const origin_tracks = [_]struct { ns: []const u8, name: []const u8 }{
         .{ .ns = "moq-clock/", .name = "seconds" },
         .{ .ns = "test/", .name = "seconds" },
+        // Extra tracks under the "demo" namespace for multi-track testing.
+        .{ .ns = "demo/", .name = "video" },
+        .{ .ns = "demo/", .name = "audio" },
+        .{ .ns = "demo/", .name = "game-state" },
     };
     for (origin_tracks) |t| {
         if (handler.track_count >= MAX_TRACKS) break;

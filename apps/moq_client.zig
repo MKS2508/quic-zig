@@ -23,24 +23,36 @@ const StreamRole = enum { control, request, data, unknown };
 
 const Mode = enum { subscribe, publish };
 
+const MAX_TRACKS_PER_SESSION: usize = 8;
+
+const TrackSub = struct {
+    ns_parts: []const []const u8,
+    name: []const u8,
+    subscribe_bidi: ?u64 = null,
+    alias: ?u64 = null,
+    subscribed: bool = false,
+    objects_received: u64 = 0,
+};
+
 const MoqClientHandler = struct {
     pub const protocol: event_loop.Protocol = .quic;
 
     mode: Mode = .subscribe,
+    // Legacy single-track fields (kept for publish mode + backward compat).
     ns_parts: []const []const u8,
     track_name: []const u8,
+    // Multi-subscribe: tracks the client wants to subscribe to in subscribe mode.
+    tracks: [MAX_TRACKS_PER_SESSION]TrackSub = undefined,
+    track_count: usize = 0,
 
     control_out: ?u64 = null,
     peer_control: ?u64 = null,
-    subscribe_bidi: ?u64 = null,
     publish_bidi: ?u64 = null,
     setup_sent: bool = false,
     setup_received: bool = false,
-    subscribed: bool = false,
     published: bool = false,
     group_id: u64 = 0,
     last_tick_ns: i128 = 0,
-    objects_received: u64 = 0,
 
     stream_roles: [256]StreamRole = [_]StreamRole{.unknown} ** 256,
 
@@ -105,7 +117,7 @@ const MoqClientHandler = struct {
 
             if (self.setup_sent and self.setup_received) {
                 switch (self.mode) {
-                    .subscribe => if (!self.subscribed) self.sendSubscribe(session),
+                    .subscribe => self.sendAllSubscribes(session),
                     .publish => if (!self.published) self.sendPublish(session),
                 }
             }
@@ -127,7 +139,12 @@ const MoqClientHandler = struct {
         switch (parsed.env.type) {
             moq_codes.MSG_SUBSCRIBE_OK => {
                 const ok = moq_msg.decodeSubscribeOk(parsed.env.payload) catch return;
-                std.debug.print("[MoQ] SUBSCRIBE_OK alias={d}\n", .{ok.track_alias});
+                if (self.trackByBidi(stream_id)) |ts| {
+                    ts.alias = ok.track_alias;
+                    std.debug.print("[MoQ] SUBSCRIBE_OK alias={d} track=\"{s}\"\n", .{ ok.track_alias, ts.name });
+                } else {
+                    std.debug.print("[MoQ] SUBSCRIBE_OK alias={d} (no bidi match)\n", .{ok.track_alias});
+                }
             },
             moq_codes.MSG_REQUEST_OK => {
                 std.debug.print("[MoQ] REQUEST_OK on stream {d}\n", .{stream_id});
@@ -140,7 +157,6 @@ const MoqClientHandler = struct {
                 std.debug.print("[MoQ] Response type=0x{x} on stream {d}\n", .{ parsed.env.type, stream_id });
             },
         }
-        _ = self;
     }
 
     fn handleDataStream(self: *MoqClientHandler, stream_id: u64, data: []const u8) void {
@@ -150,8 +166,9 @@ const MoqClientHandler = struct {
             return;
         };
         const h = parsed.header;
-        std.debug.print("[MoQ] Subgroup: alias={d} group={d} sub={?d} eog={}\n", .{
-            h.track_alias, h.group, h.subgroup, h.end_of_group,
+        const track_name: []const u8 = if (self.trackByAlias(h.track_alias)) |ts| ts.name else "?";
+        std.debug.print("[MoQ] Subgroup: alias={d} track=\"{s}\" group={d} sub={?d}\n", .{
+            h.track_alias, track_name, h.group, h.subgroup,
         });
 
         // Read objects from remainder.
@@ -166,33 +183,51 @@ const MoqClientHandler = struct {
             const hdr_len = obj_fbs.pos;
             if (off + hdr_len + plen > rest.len) break;
             const payload = rest[off + hdr_len .. off + hdr_len + plen];
-            std.debug.print("[MoQ] Object: group={d} obj={d} payload=\"{s}\"\n", .{ h.group, obj_id, payload });
-            self.objects_received += 1;
+            std.debug.print("[MoQ] Object track=\"{s}\" group={d} obj={d} payload=\"{s}\"\n", .{ track_name, h.group, obj_id, payload });
+            if (self.trackByAlias(h.track_alias)) |ts| ts.objects_received += 1;
             off += hdr_len + plen;
         }
     }
 
-    fn sendSubscribe(self: *MoqClientHandler, session: *event_loop.ClientSession) void {
-        // Open a bidi stream for the SUBSCRIBE request.
-        const bidi = session.openStream() catch |e| {
-            std.debug.print("[MoQ] Failed to open bidi stream: {}\n", .{e});
-            return;
-        };
-        self.subscribe_bidi = bidi;
-        self.setRole(bidi, .request);
-        self.subscribed = true;
+    fn sendAllSubscribes(self: *MoqClientHandler, session: *event_loop.ClientSession) void {
+        for (self.tracks[0..self.track_count]) |*ts| {
+            if (ts.subscribed) continue;
+            const bidi = session.openStream() catch |e| {
+                std.debug.print("[MoQ] Failed to open bidi stream: {}\n", .{e});
+                return;
+            };
+            ts.subscribe_bidi = bidi;
+            ts.subscribed = true;
+            self.setRole(bidi, .request);
 
-        var buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        moq_msg.writeSubscribe(fbs.writer(), .{
-            .track_namespace = self.ns_parts,
-            .track_name = self.track_name,
-            .subscriber_priority = 128,
-            .group_order = .ascending,
-            .filter_type = .latest_object,
-        }) catch return;
-        session.writeStream(bidi, buf[0..fbs.pos]) catch return;
-        std.debug.print("[MoQ] Sent SUBSCRIBE on bidi stream {d}\n", .{bidi});
+            var buf: [512]u8 = undefined;
+            var fbs = std.io.fixedBufferStream(&buf);
+            moq_msg.writeSubscribe(fbs.writer(), .{
+                .track_namespace = ts.ns_parts,
+                .track_name = ts.name,
+                .subscriber_priority = 128,
+                .group_order = .ascending,
+                .filter_type = .latest_object,
+            }) catch return;
+            session.writeStream(bidi, buf[0..fbs.pos]) catch return;
+            std.debug.print("[MoQ] Sent SUBSCRIBE on bidi {d} for track \"{s}\"\n", .{ bidi, ts.name });
+        }
+    }
+
+    // Route received SUBSCRIBE_OK to the correct track entry by bidi stream.
+    fn trackByBidi(self: *MoqClientHandler, stream_id: u64) ?*TrackSub {
+        for (self.tracks[0..self.track_count]) |*ts| {
+            if (ts.subscribe_bidi == stream_id) return ts;
+        }
+        return null;
+    }
+
+    // Route incoming data-stream objects to the track entry by alias.
+    fn trackByAlias(self: *MoqClientHandler, alias: u64) ?*TrackSub {
+        for (self.tracks[0..self.track_count]) |*ts| {
+            if (ts.alias == alias) return ts;
+        }
+        return null;
     }
 
     fn sendPublish(self: *MoqClientHandler, session: *event_loop.ClientSession) void {
@@ -260,6 +295,10 @@ pub fn main() !void {
     var track_name: []const u8 = "seconds";
     var mode: Mode = .subscribe;
 
+    // For multi-track subscribe: repeated --track flags accumulate here.
+    var track_names = std.ArrayList([]const u8){ .items = &.{}, .capacity = 0 };
+    defer track_names.deinit(alloc);
+
     var args = std.process.args();
     _ = args.next();
     while (args.next()) |arg| {
@@ -275,7 +314,10 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "--ns")) {
             if (args.next()) |v| ns_str = v;
         } else if (std.mem.eql(u8, arg, "--track")) {
-            if (args.next()) |v| track_name = v;
+            if (args.next()) |v| {
+                track_name = v;
+                try track_names.append(alloc, v);
+            }
         } else if (std.mem.eql(u8, arg, "--server-name")) {
             if (args.next()) |v| server_name = v;
         } else if (std.mem.eql(u8, arg, "--mode")) {
@@ -283,6 +325,11 @@ pub fn main() !void {
                 if (std.mem.eql(u8, v, "publish")) mode = .publish;
             }
         }
+    }
+
+    // If no --track was given explicitly, use the default.
+    if (track_names.items.len == 0) {
+        try track_names.append(alloc, track_name);
     }
 
     // Parse namespace: "moq-clock" → ["moq-clock"], "a,b" → ["a","b"]
@@ -294,18 +341,32 @@ pub fn main() !void {
 
     std.debug.print("\n=== MoQ Client (draft-17, raw QUIC) ===\n", .{});
     std.debug.print("Target: {s}:{d}  ALPN: {s}\n", .{ address, port, moq_version.ALPN });
-    std.debug.print("Track: [", .{});
+    std.debug.print("Namespace: [", .{});
     for (ns_list.items, 0..) |p, i| {
         if (i > 0) std.debug.print(",", .{});
         std.debug.print("{s}", .{p});
     }
-    std.debug.print("] / {s}\n\n", .{track_name});
+    std.debug.print("]\n", .{});
+    std.debug.print("Tracks ({d}): ", .{track_names.items.len});
+    for (track_names.items, 0..) |n, i| {
+        if (i > 0) std.debug.print(", ", .{});
+        std.debug.print("{s}", .{n});
+    }
+    std.debug.print("\n\n", .{});
 
     var handler = MoqClientHandler{
         .mode = mode,
         .ns_parts = ns_list.items,
         .track_name = track_name,
     };
+    for (track_names.items) |n| {
+        if (handler.track_count >= MAX_TRACKS_PER_SESSION) break;
+        handler.tracks[handler.track_count] = .{
+            .ns_parts = ns_list.items,
+            .name = n,
+        };
+        handler.track_count += 1;
+    }
 
     var client = try event_loop.Client(MoqClientHandler).init(alloc, &handler, .{
         .address = address,
