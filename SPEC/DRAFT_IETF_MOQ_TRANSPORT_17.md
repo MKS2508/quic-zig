@@ -182,10 +182,13 @@ Invalid datagram types: `0x22, 0x23, 0x26, 0x27, 0x2A, 0x2B, 0x2E, 0x2F` (STATUS
 | Publisher / Subscriber | `moq_client.zig` has `--mode publish` / subscribe; `moq_server.zig` is a publisher |
 | Relay | done in `apps/moq_relay.zig`: pub/sub fanout with alias remapping + synthetic origin |
 | Browser (WebTransport) demo | done in `apps/moq_browser_server.zig` + `interop/browser/moq.html` |
-| Interop vs moq-rs | SETUP + SUBSCRIBE validated (wire format confirmed); data plane blocked by moq-rs auth config (their issue) |
+| Interop vs moq-rs | SETUP + SUBSCRIBE + SUBSCRIBE_NAMESPACE all validated; moq-rs reaches "broadcast is online, subscribing to track" against our relay; intermittent session close still under investigation |
 | Datagram objects | codec done + tested; runtime path deferred (needs `.quic` datagram dispatch in event_loop) |
 | FETCH stream | header codec done; runtime request/response flow deferred |
-| Namespace discovery | message codecs done (SUBSCRIBE_NAMESPACE, NAMESPACE, NAMESPACE_DONE, PUBLISH_NAMESPACE); runtime flow deferred |
+| Namespace discovery | **done in raw-QUIC relay**: SUBSCRIBE_NAMESPACE handler + NAMESPACE/REQUEST_OK response + pre-registered synthetic origin tracks |
+| Group cache (relay) | **done**: per-track ring of N completed groups (default 2, 256 KB each). New subscribers replay cached groups on SUBSCRIBE_OK for immediate playback instead of waiting for next keyframe |
+| Multi-track per session | **done**: `moq-client` accepts repeated `--track` flags, tracks aliases, routes incoming data by track_alias |
+| Publisher liveness | **done**: relay detects closed publisher connections each poll cycle, clears publisher slot, logs gone-tracks (PUBLISH_DONE emission hooks in place) |
 
 ## Verified interop matrix
 
