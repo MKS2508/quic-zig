@@ -25,8 +25,8 @@ pub const std_options: std.Options = .{ .log_level = .err };
 const MAX_CLIENTS: usize = 8;
 const MAX_TRACKS: usize = 16;
 const MAX_SUBS_PER_TRACK: usize = 8;
-const MAX_STREAMS_PER_CLIENT: usize = 16;
-const STREAM_BUF_SIZE: usize = 200_000; // video frames can be larger than 64KB
+const MAX_STREAMS_PER_CLIENT: usize = 64;
+const STREAM_BUF_SIZE: usize = 65_536; // VP8 keyframes typically ≤ 16 KB
 
 const StreamRole = enum { control, request, data, unknown };
 
@@ -59,6 +59,7 @@ const Client = struct {
     stream_ids: [MAX_STREAMS_PER_CLIENT]u64 = [_]u64{std.math.maxInt(u64)} ** MAX_STREAMS_PER_CLIENT,
     stream_roles: [MAX_STREAMS_PER_CLIENT]StreamRole = [_]StreamRole{.unknown} ** MAX_STREAMS_PER_CLIENT,
     stream_bufs: [MAX_STREAMS_PER_CLIENT]StreamBuf = [_]StreamBuf{.{}} ** MAX_STREAMS_PER_CLIENT,
+    fwd_states: [MAX_STREAMS_PER_CLIENT]FwdState = [_]FwdState{.{}} ** MAX_STREAMS_PER_CLIENT,
 
     fn findOrAddSlot(self: *Client, sid: u64) ?usize {
         for (self.stream_ids[0..], 0..) |id, i| {
@@ -84,12 +85,17 @@ const Client = struct {
         if (self.findOrAddSlot(sid)) |i| return &self.stream_bufs[i];
         return null;
     }
+    fn fwdState(self: *Client, sid: u64) ?*FwdState {
+        if (self.findOrAddSlot(sid)) |i| return &self.fwd_states[i];
+        return null;
+    }
     fn clearSlot(self: *Client, sid: u64) void {
         for (self.stream_ids[0..], 0..) |id, i| {
             if (id == sid) {
                 self.stream_ids[i] = std.math.maxInt(u64);
                 self.stream_roles[i] = .unknown;
                 self.stream_bufs[i].len = 0;
+                self.fwd_states[i] = .{};
                 return;
             }
         }
@@ -111,6 +117,18 @@ const StreamBuf = struct {
     fn slice(self: *const StreamBuf) []const u8 {
         return self.data[0..self.len];
     }
+};
+
+// Per-input-stream forwarding state: remembers output streams to subscribers
+// so we can forward incrementally as publisher data arrives (no need to wait
+// for FIN).
+const FwdState = struct {
+    active: bool = false,
+    header_parsed: bool = false,
+    forwarded_pos: usize = 0, // byte offset in publisher stream (after subgroup header)
+    out_stream_ids: [MAX_SUBS_PER_TRACK]u64 = [_]u64{0} ** MAX_SUBS_PER_TRACK,
+    out_sub_idx: [MAX_SUBS_PER_TRACK]usize = [_]usize{0} ** MAX_SUBS_PER_TRACK,
+    out_count: usize = 0,
 };
 
 const RelayHandler = struct {
@@ -321,62 +339,96 @@ const RelayHandler = struct {
     }
 
     fn tryForwardData(self: *RelayHandler, ci: usize, stream_id: u64, fin: bool) void {
-        if (!fin) return;
         const buf = self.clients[ci].buffer(stream_id) orelse return;
-        if (buf.len == 0) return;
+        const fs = self.clients[ci].fwdState(stream_id) orelse return;
 
-        var fbs = std.io.fixedBufferStream(@as([]const u8, buf.slice()));
-        const parsed = moq_obj.readSubgroupHeader(&fbs) catch return;
-        const h = parsed.header;
+        // First: parse the header and open sub-streams once per input stream.
+        if (!fs.header_parsed) {
+            if (buf.len < 3) return; // need more bytes
+            var fbs = std.io.fixedBufferStream(@as([]const u8, buf.slice()));
+            const parsed = moq_obj.readSubgroupHeader(&fbs) catch return; // need more bytes or bad
+            const h = parsed.header;
 
-        // Find the track by publisher alias.
-        var track_idx: ?usize = null;
-        for (self.tracks[0..self.track_count], 0..) |*t, ti| {
-            if (t.active and t.publisher_idx == ci and t.pub_alias == h.track_alias) {
-                track_idx = ti;
-                break;
+            // Find the track by publisher alias.
+            var track_idx: ?usize = null;
+            for (self.tracks[0..self.track_count], 0..) |*t, ti| {
+                if (t.active and t.publisher_idx == ci and t.pub_alias == h.track_alias) {
+                    track_idx = ti;
+                    break;
+                }
+            }
+            const ti = track_idx orelse return;
+            const t = &self.tracks[ti];
+
+            // Open a subscriber output stream for each subscriber, write rewritten header.
+            fs.out_count = 0;
+            for (0..t.sub_count) |si| {
+                const sub_ci = t.sub_client_idx[si];
+                if (!self.clients[sub_ci].active) continue;
+                const sub_entry = self.clients[sub_ci].entry orelse continue;
+                var sub_wtc = if (sub_entry.wt_conn) |*w| w else continue;
+                const sub_sid = self.clients[sub_ci].wt_session_id;
+
+                const out = sub_wtc.openUniStream(sub_sid, null) catch |e| {
+                    std.debug.print("[relay] openUniStream failed for sub {d}: {}\n", .{ sub_ci, e });
+                    continue;
+                };
+
+                var hdr_buf: [128]u8 = undefined;
+                var hdr_fbs = std.io.fixedBufferStream(&hdr_buf);
+                moq_obj.writeSubgroupHeader(hdr_fbs.writer(), .{
+                    .track_alias = t.sub_alias[si],
+                    .group = h.group,
+                    .subgroup = h.subgroup,
+                    .publisher_priority = h.publisher_priority,
+                    .end_of_group = h.end_of_group,
+                    .per_object_properties = h.per_object_properties,
+                }) catch continue;
+                sub_wtc.sendStreamData(out, hdr_buf[0..hdr_fbs.pos]) catch continue;
+
+                fs.out_stream_ids[fs.out_count] = out;
+                fs.out_sub_idx[fs.out_count] = sub_ci;
+                fs.out_count += 1;
+            }
+            std.debug.print("[relay] stream from client {d} → {d} subs (group={d})\n", .{ ci, fs.out_count, h.group });
+
+            fs.header_parsed = true;
+            fs.forwarded_pos = fbs.pos;
+        }
+
+        // Forward any newly arrived bytes.
+        if (fs.forwarded_pos < buf.len) {
+            const chunk = buf.slice()[fs.forwarded_pos..];
+            for (0..fs.out_count) |i| {
+                const sub_ci = fs.out_sub_idx[i];
+                if (!self.clients[sub_ci].active) continue;
+                const sub_entry = self.clients[sub_ci].entry orelse continue;
+                var sub_wtc = if (sub_entry.wt_conn) |*w| w else continue;
+                sub_wtc.sendStreamData(fs.out_stream_ids[i], chunk) catch |e| {
+                    std.debug.print("[relay] fwd chunk to sub {d}: {}\n", .{ sub_ci, e });
+                };
+            }
+            fs.forwarded_pos = buf.len;
+        }
+
+        // On FIN: close all sub-streams.
+        if (fin) {
+            for (0..fs.out_count) |i| {
+                const sub_ci = fs.out_sub_idx[i];
+                if (!self.clients[sub_ci].active) continue;
+                const sub_entry = self.clients[sub_ci].entry orelse continue;
+                var sub_wtc = if (sub_entry.wt_conn) |*w| w else continue;
+                sub_wtc.closeStream(fs.out_stream_ids[i]);
             }
         }
-        const ti = track_idx orelse {
-            buf.reset();
-            return;
-        };
-        const t = &self.tracks[ti];
 
-        const payload = buf.slice()[fbs.pos..];
-        std.debug.print("[relay] forward track={d} group={d} bytes={d} → {d} subs\n", .{
-            ti, h.group, buf.len, t.sub_count,
-        });
-
-        for (0..t.sub_count) |si| {
-            const sub_ci = t.sub_client_idx[si];
-            const sub_alias = t.sub_alias[si];
-            if (!self.clients[sub_ci].active) continue;
-            const sub_entry = self.clients[sub_ci].entry orelse continue;
-            var sub_wtc = if (sub_entry.wt_conn) |*w| w else continue;
-            const sub_sid = self.clients[sub_ci].wt_session_id;
-
-            const out = sub_wtc.openUniStream(sub_sid, null) catch continue;
-
-            var out_buf: [65536]u8 = undefined;
-            var out_fbs = std.io.fixedBufferStream(&out_buf);
-            const w = out_fbs.writer();
-
-            moq_obj.writeSubgroupHeader(w, .{
-                .track_alias = sub_alias,
-                .group = h.group,
-                .subgroup = h.subgroup,
-                .publisher_priority = h.publisher_priority,
-                .end_of_group = h.end_of_group,
-                .per_object_properties = h.per_object_properties,
-            }) catch continue;
-            w.writeAll(payload) catch continue;
-
-            sub_wtc.sendStreamData(out, out_buf[0..out_fbs.pos]) catch continue;
-            sub_wtc.closeStream(out);
+        // Compact the buffer: once we've forwarded bytes, we can drop them.
+        if (fs.forwarded_pos > 0) {
+            const remaining = buf.slice()[fs.forwarded_pos..];
+            std.mem.copyForwards(u8, &buf.data, remaining);
+            buf.len = remaining.len;
+            fs.forwarded_pos = 0;
         }
-
-        buf.reset();
     }
 
     pub fn onDatagram(_: *RelayHandler, _: *event_loop.Session, _: u64, _: []const u8) void {}

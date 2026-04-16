@@ -292,11 +292,16 @@ async function readIncomingUniStreams() {
       (async () => {
         const sr = stream.getReader();
         let buf = new Uint8Array(0);
+        let headerParsed = false; // for data streams
+        let streamState = null; // { subgroupAlias, group, readOff }
+
         try {
           while (true) {
             const { done: sd, value: chunk } = await sr.read();
             if (chunk && chunk.length > 0) {
               buf = concat(buf, chunk);
+
+              // Control stream: first parse SETUP.
               if (!setupReceived) {
                 try {
                   const env = parseEnvelope(buf);
@@ -307,18 +312,87 @@ async function readIncomingUniStreams() {
                   }
                 } catch (e) {}
               }
+
+              // Data stream (subgroup): parse header + objects incrementally.
+              if (mode === 'subscribe' && setupReceived) {
+                if (!headerParsed) {
+                  try {
+                    const hdr = parseSubgroupHeader(buf, 0);
+                    streamState = { hdr, readOff: hdr.consumed };
+                    headerParsed = true;
+                  } catch (e) {
+                    // Need more bytes or not a subgroup stream — keep buffering.
+                  }
+                }
+                if (headerParsed && streamState) {
+                  // Try to consume as many complete objects as possible.
+                  while (streamState.readOff < buf.length) {
+                    const savedOff = streamState.readOff;
+                    try {
+                      const { value: objId, len: ol } = moqVarintDecode(buf, streamState.readOff);
+                      streamState.readOff += ol;
+                      const { value: payloadLen, len: pl } = moqVarintDecode(buf, streamState.readOff);
+                      streamState.readOff += pl;
+                      if (streamState.readOff + payloadLen > buf.length) {
+                        // Partial object: restore and wait for more bytes.
+                        streamState.readOff = savedOff;
+                        break;
+                      }
+                      const payload = buf.slice(streamState.readOff, streamState.readOff + payloadLen);
+                      streamState.readOff += payloadLen;
+                      handleDecodedObject(streamState.hdr, objId, payload);
+                    } catch (e) {
+                      streamState.readOff = savedOff;
+                      break;
+                    }
+                  }
+                  // Compact: drop consumed bytes.
+                  if (streamState.readOff > 0) {
+                    buf = buf.slice(streamState.readOff);
+                    streamState.readOff = 0;
+                  }
+                }
+              }
             }
             if (sd) break;
           }
         } catch (e) {}
-
-        // After FIN: if it's a data stream (subgroup), process for subscriber mode.
-        if (mode === 'subscribe' && buf.length > 0 && setupReceived) {
-          try { handleIncomingSubgroup(buf); } catch (e) { log('log-error', `subgroup: ${e.message}`); }
-        }
       })();
     }
   } catch (e) {}
+}
+
+let debugCount = 0;
+function handleDecodedObject(hdr, objId, payload) {
+  subBytes += payload.length;
+  const isKey = payload[0] === 1;
+  const ts = moqVarintDecode(payload, 1);
+  const codecData = payload.slice(1 + ts.len);
+
+  if (debugCount++ < 5) {
+    log('log-info', `obj received: group=${hdr.group} objId=${objId} key=${isKey} bytes=${payload.length} codec=${codecData.length}`);
+  }
+
+  if (!gotKeyframe && !isKey) {
+    if (debugCount < 10) log('log-info', `skipping non-key before first keyframe`);
+    return;
+  }
+  if (isKey) gotKeyframe = true;
+
+  if (decoder && decoder.state === 'configured') {
+    try {
+      decoder.decode(new EncodedVideoChunk({
+        type: isKey ? 'key' : 'delta',
+        timestamp: ts.value,
+        data: codecData,
+      }));
+    } catch (e) {
+      log('log-error', `decode: ${e.message}`);
+      gotKeyframe = false;
+    }
+  } else {
+    log('log-error', `decoder not configured (state=${decoder?.state})`);
+  }
 }
 
 // ─── Publisher ────────────────────────────────────────────────────
@@ -371,36 +445,38 @@ async function startPublish() {
 
     let groupId = 0;
     let frameInGroup = 0;
+    let groupWriter = null; // current uni stream writer (one per group)
     const FRAMES_PER_GROUP = 30; // new keyframe every ~1 sec
 
     encoder = new VideoEncoder({
       output: async (chunk, meta) => {
         try {
           const isKey = chunk.type === 'key';
-          if (isKey && frameInGroup > 0) { groupId++; frameInGroup = 0; }
 
-          // Write one uni stream per frame: subgroup header + object (timestamp + frame bytes)
-          const s = await wt.createUnidirectionalStream();
-          const w = s.getWriter();
+          // On a new keyframe, rotate the group stream.
+          if (isKey) {
+            if (groupWriter) { try { await groupWriter.close(); } catch (e) {} }
+            if (frameInGroup > 0) groupId++;
+            frameInGroup = 0;
+            const s = await wt.createUnidirectionalStream();
+            groupWriter = s.getWriter();
+            // Subgroup header: once per stream.
+            await groupWriter.write(buildSubgroupHeader(1, groupId, 0, 128));
+          }
+          if (!groupWriter) return; // wait for first keyframe
 
-          const hdr = buildSubgroupHeader(1, groupId, frameInGroup, 128);
           const chunkBytes = new Uint8Array(chunk.byteLength);
           chunk.copyTo(chunkBytes);
-
-          // Object payload: keyframe flag (1 byte) + timestamp (varint μs) + data
           const flag = new Uint8Array([isKey ? 1 : 0]);
           const ts = moqVarintEncode(chunk.timestamp);
           const objBody = concat(flag, ts, chunkBytes);
-
-          // Object header in stream: object_id varint + payload_len varint + payload
           const objHdr = concat(moqVarintEncode(frameInGroup), moqVarintEncode(objBody.length));
-          await w.write(concat(hdr, objHdr, objBody));
-          await w.close();
+          await groupWriter.write(concat(objHdr, objBody));
 
           pubFrames++;
           frameInGroup++;
           const elapsed = (performance.now() - startTime) / 1000;
-          setStats('pubStats', `Sent ${pubFrames} frames, ${(pubFrames/elapsed).toFixed(1)} fps, group=${groupId}, key=${isKey}`);
+          setStats('pubStats', `Sent ${pubFrames} frames, ${(pubFrames/elapsed).toFixed(1)} fps, group=${groupId}, frame=${frameInGroup}`);
         } catch (e) {
           log('log-error', `encode send: ${e.message}`);
         }
