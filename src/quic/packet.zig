@@ -416,8 +416,16 @@ pub fn decryptWithKeyUpdate(header: *Header, fbs: anytype, space: *PacketNumSpac
     var sample_buf: [crypto.SAMPLE_LEN]u8 = undefined;
     @memcpy(&sample_buf, fbs.buffer[sample_offset..][0..crypto.SAMPLE_LEN]);
 
-    // Generate mask using the invariant HP key (cipher-suite-aware)
-    const mask_arr = crypto.computeHpMask(&sample_buf, ku.hp_open, ku.cipher_suite);
+    // Generate mask using the invariant HP key (cipher-suite-aware).
+    // Reuse the cached AES-128 round keys when available (AES suites).
+    const mask_arr = blk: {
+        if (ku.hp_open_ctx) |ctx| {
+            var encrypted_out: [crypto.SAMPLE_LEN]u8 = undefined;
+            ctx.encrypt(&encrypted_out, &sample_buf);
+            break :blk encrypted_out[0..crypto.MASK_LEN].*;
+        }
+        break :blk crypto.computeHpMask(&sample_buf, ku.hp_open, ku.cipher_suite);
+    };
     const mask = &mask_arr;
 
     // Short header unmasking

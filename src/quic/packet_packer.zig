@@ -603,13 +603,11 @@ pub const PacketPacker = struct {
 
         const total_packet_len = encrypted_start + encrypted_len;
 
-        // Apply header protection
-        crypto_mod.applyHeaderProtection(
+        // Apply header protection (uses cached AES HP context when available)
+        seal.applyHeaderProtection(
             buf[header_start..total_packet_len],
             pn_offset - header_start,
             pn_len,
-            seal.hp_key,
-            seal.cipher_suite,
         );
 
         // Record the packet as sent, including stream frame info for retransmission
@@ -694,8 +692,8 @@ pub const PacketPacker = struct {
         const encrypted_len = seal.encryptPayload(pn, ad, plaintext_payload, buf[encrypted_start..]);
         const total_len = encrypted_start + encrypted_len;
 
-        // Apply header protection
-        crypto_mod.applyHeaderProtection(buf[0..total_len], pn_offset, pn_len, seal.hp_key, seal.cipher_suite);
+        // Apply header protection (uses cached AES HP context when available)
+        seal.applyHeaderProtection(buf[0..total_len], pn_offset, pn_len);
 
         // Record as sent (in_flight but special — caller handles probe loss separately)
         try pkt_handler.onPacketSent(.{

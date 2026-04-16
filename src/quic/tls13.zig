@@ -425,23 +425,27 @@ pub const KeySchedule = struct {
     pub fn makeOpenFull(traffic_secret: [32]u8, cipher: quic_crypto.CipherSuite, version: u32) quic_crypto.Open {
         const kl = cipher.keyLen();
         const label_iv = protocol.quicLabel(version, .iv);
-        return .{
+        var open: quic_crypto.Open = .{
             .key = quic_crypto.deriveKeyPaddedV(traffic_secret, kl, version),
             .nonce = quic_crypto.hkdfExpandLabelRuntime(traffic_secret, label_iv, "", 12),
             .hp_key = quic_crypto.deriveHpKeyPaddedV(traffic_secret, cipher.hpKeyLen(), version),
             .cipher_suite = cipher,
         };
+        open.prepareHpCtx();
+        return open;
     }
 
     pub fn makeSealFull(traffic_secret: [32]u8, cipher: quic_crypto.CipherSuite, version: u32) quic_crypto.Seal {
         const kl = cipher.keyLen();
         const label_iv = protocol.quicLabel(version, .iv);
-        return .{
+        var seal: quic_crypto.Seal = .{
             .key = quic_crypto.deriveKeyPaddedV(traffic_secret, kl, version),
             .nonce = quic_crypto.hkdfExpandLabelRuntime(traffic_secret, label_iv, "", 12),
             .hp_key = quic_crypto.deriveHpKeyPaddedV(traffic_secret, cipher.hpKeyLen(), version),
             .cipher_suite = cipher,
         };
+        seal.prepareHpCtx();
+        return seal;
     }
 
     // Compute the Finished verify_data.

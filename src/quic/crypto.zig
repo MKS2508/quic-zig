@@ -24,6 +24,10 @@ pub const MASK_LEN = 5;
 pub const Aead = Aes128Gcm;
 const Hmac = HmacSha256;
 
+/// Cached AES-128 encryption context for header protection. Computed once per
+/// Seal/Open from the (immutable) hp_key, then reused on every packet.
+pub const Aes128HpCtx = @TypeOf(Aes128.initEnc(@as([16]u8, undefined)));
+
 // AES-128-GCM key length (used for initial keys which are always AES)
 pub const key_len = 16;
 pub const nonce_len = 12;
@@ -73,9 +77,25 @@ pub const Open = struct {
     hp_key: [max_key_len]u8 = .{0} ** max_key_len,
     nonce: [nonce_len]u8,
     cipher_suite: CipherSuite = .aes_128_gcm_sha256,
+    /// Pre-expanded AES-128 round keys for header protection (AES suites only).
+    /// Populated by prepareHpCtx() at construction; copied with the struct.
+    hp_aes_ctx: ?Aes128HpCtx = null,
+
+    /// Pre-compute the AES-128 HP context. Safe to call multiple times.
+    /// Must be called after hp_key + cipher_suite are set.
+    pub fn prepareHpCtx(self: *Open) void {
+        if (self.cipher_suite == .aes_128_gcm_sha256) {
+            self.hp_aes_ctx = Aes128.initEnc(self.hp_key[0..16].*);
+        }
+    }
 
     /// Generate a new QUIC Header Protection mask.
     pub fn newMask(self: *const Open, sample: *const [SAMPLE_LEN]u8) [MASK_LEN]u8 {
+        if (self.hp_aes_ctx) |ctx| {
+            var encrypted_out: [SAMPLE_LEN]u8 = undefined;
+            ctx.encrypt(&encrypted_out, sample);
+            return encrypted_out[0..MASK_LEN].*;
+        }
         return computeHpMask(sample, self.hp_key, self.cipher_suite);
     }
 
@@ -123,10 +143,52 @@ pub const Seal = struct {
     hp_key: [max_key_len]u8 = .{0} ** max_key_len,
     nonce: [nonce_len]u8,
     cipher_suite: CipherSuite = .aes_128_gcm_sha256,
+    /// Pre-expanded AES-128 round keys for header protection (AES suites only).
+    /// Populated by prepareHpCtx() at construction; copied with the struct.
+    hp_aes_ctx: ?Aes128HpCtx = null,
+
+    /// Pre-compute the AES-128 HP context. Safe to call multiple times.
+    /// Must be called after hp_key + cipher_suite are set.
+    pub fn prepareHpCtx(self: *Seal) void {
+        if (self.cipher_suite == .aes_128_gcm_sha256) {
+            self.hp_aes_ctx = Aes128.initEnc(self.hp_key[0..16].*);
+        }
+    }
 
     /// Generate a new QUIC Header Protection mask.
     pub fn newMask(self: *const Seal, sample: *const [SAMPLE_LEN]u8) [MASK_LEN]u8 {
+        if (self.hp_aes_ctx) |ctx| {
+            var encrypted_out: [SAMPLE_LEN]u8 = undefined;
+            ctx.encrypt(&encrypted_out, sample);
+            return encrypted_out[0..MASK_LEN].*;
+        }
         return computeHpMask(sample, self.hp_key, self.cipher_suite);
+    }
+
+    /// Apply header protection using the cached HP context if available.
+    /// Equivalent to the standalone applyHeaderProtection() but reuses the
+    /// pre-expanded AES round keys. RFC 9001 §5.4.
+    pub fn applyHeaderProtection(
+        self: *const Seal,
+        pkt_buf: []u8,
+        pn_offset: usize,
+        pn_len: usize,
+    ) void {
+        const sample_offset = pn_offset + 4;
+        if (sample_offset + SAMPLE_LEN > pkt_buf.len) return;
+
+        const sample: *const [SAMPLE_LEN]u8 = pkt_buf[sample_offset..][0..SAMPLE_LEN];
+        const mask = self.newMask(sample);
+
+        if (isLongHeader(pkt_buf[0])) {
+            pkt_buf[0] ^= (mask[0] & 0x0f);
+        } else {
+            pkt_buf[0] ^= (mask[0] & 0x1f);
+        }
+
+        for (0..pn_len) |i| {
+            pkt_buf[pn_offset + i] ^= mask[1 + i];
+        }
     }
 
     /// Encrypt a QUIC packet payload using AEAD.
@@ -331,13 +393,18 @@ pub fn deriveInitialKeyMaterial(
     var server_hp_key: [max_key_len]u8 = .{0} ** max_key_len;
     @memcpy(server_hp_key[0..key_len], &server_hp_16);
 
-    return if (is_server) .{
-        Open{ .key = client_key, .hp_key = client_hp_key, .nonce = client_iv },
-        Seal{ .key = server_key, .hp_key = server_hp_key, .nonce = server_iv },
-    } else .{
-        Open{ .key = server_key, .hp_key = server_hp_key, .nonce = server_iv },
-        Seal{ .key = client_key, .hp_key = client_hp_key, .nonce = client_iv },
-    };
+    var open: Open = undefined;
+    var seal: Seal = undefined;
+    if (is_server) {
+        open = .{ .key = client_key, .hp_key = client_hp_key, .nonce = client_iv };
+        seal = .{ .key = server_key, .hp_key = server_hp_key, .nonce = server_iv };
+    } else {
+        open = .{ .key = server_key, .hp_key = server_hp_key, .nonce = server_iv };
+        seal = .{ .key = client_key, .hp_key = client_hp_key, .nonce = client_iv };
+    }
+    open.prepareHpCtx();
+    seal.prepareHpCtx();
+    return .{ open, seal };
 }
 
 // https://www.rfc-editor.org/rfc/rfc9001#section-a.1
@@ -606,6 +673,11 @@ pub const KeyUpdateManager = struct {
     hp_open: [max_key_len]u8,
     hp_seal: [max_key_len]u8,
 
+    // Pre-expanded AES-128 round keys for HP (AES suites only). HP keys never
+    // change, so these are computed once during init.
+    hp_open_ctx: ?Aes128HpCtx = null,
+    hp_seal_ctx: ?Aes128HpCtx = null,
+
     // Cipher suite for this key generation
     cipher_suite: CipherSuite = .aes_128_gcm_sha256,
 
@@ -658,18 +730,29 @@ pub const KeyUpdateManager = struct {
         const next_send_key = deriveKeyPaddedL(next_send_secret, kl, label_key);
         const next_send_iv = hkdfExpandLabelRuntime(next_send_secret, label_iv, "", nonce_len);
 
-        return .{
+        var ku: KeyUpdateManager = .{
             .current_open = .{ .key = recv_key, .hp_key = recv_hp, .nonce = recv_iv, .cipher_suite = cipher_suite },
             .current_seal = .{ .key = send_key, .hp_key = send_hp, .nonce = send_iv, .cipher_suite = cipher_suite },
             .next_open = .{ .key = next_recv_key, .hp_key = recv_hp, .nonce = next_recv_iv, .cipher_suite = cipher_suite },
             .next_seal = .{ .key = next_send_key, .hp_key = send_hp, .nonce = next_send_iv, .cipher_suite = cipher_suite },
             .hp_open = recv_hp,
             .hp_seal = send_hp,
+            .hp_open_ctx = null,
+            .hp_seal_ctx = null,
             .cipher_suite = cipher_suite,
             .version = version,
             .recv_secret = recv_secret,
             .send_secret = send_secret,
         };
+        ku.current_open.prepareHpCtx();
+        ku.current_seal.prepareHpCtx();
+        ku.next_open.prepareHpCtx();
+        ku.next_seal.prepareHpCtx();
+        if (cipher_suite == .aes_128_gcm_sha256) {
+            ku.hp_open_ctx = Aes128.initEnc(recv_hp[0..16].*);
+            ku.hp_seal_ctx = Aes128.initEnc(send_hp[0..16].*);
+        }
+        return ku;
     }
 
     /// Rotate keys: prev←current, current←next, pre-compute new next.
@@ -698,12 +781,14 @@ pub const KeyUpdateManager = struct {
             .hp_key = self.hp_open,
             .nonce = hkdfExpandLabelRuntime(next_recv_secret, label_iv, "", nonce_len),
             .cipher_suite = self.cipher_suite,
+            .hp_aes_ctx = self.hp_open_ctx,
         };
         self.next_seal = .{
             .key = deriveKeyPaddedL(next_send_secret, kl, label_key),
             .hp_key = self.hp_seal,
             .nonce = hkdfExpandLabelRuntime(next_send_secret, label_iv, "", nonce_len),
             .cipher_suite = self.cipher_suite,
+            .hp_aes_ctx = self.hp_seal_ctx,
         };
 
         // Toggle key phase

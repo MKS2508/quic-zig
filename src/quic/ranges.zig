@@ -56,8 +56,15 @@ pub const RangeSet = struct {
 
     /// Check if a value is contained in any range.
     pub fn contains(self: *const RangeSet, val: u64) bool {
-        for (self.ranges.items) |r| {
-            if (val > r.end) return false; // ranges are descending, no point continuing
+        const items = self.ranges.items;
+        if (items.len == 0) return false;
+        // Lower-bound short-circuit: ranges are descending, the original loop
+        // already exits when val > largest, but had no guard for val < smallest.
+        // Adds one compare in the common case, eliminates an O(n) scan when the
+        // peer references packet numbers older than anything we still track.
+        if (val < items[items.len - 1].start) return false;
+        for (items) |r| {
+            if (val > r.end) return false;
             if (r.contains(val)) return true;
         }
         return false;
