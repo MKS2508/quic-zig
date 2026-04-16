@@ -1,8 +1,23 @@
 # Media-over-QUIC Transport — draft-ietf-moq-transport-17
 
-Status: in progress. Phase 1 (wire primitives) under implementation.
+Status: **working end-to-end**. Wire layer complete. Raw-QUIC + WebTransport relays operational. Live browser video demo verified with multiple simultaneous subscribers.
 
 Reference: `draft-ietf-moq-transport-17` (expires 2026-09). Cross-checked against `moq-rs` (kixelated/moq-rs) `main`, which implements draft-14/15/16/17 concurrently.
+
+## Apps shipped
+
+| Binary | Purpose |
+| --- | --- |
+| `moq-server` | Raw-QUIC MoQ publisher (synthetic clock track) |
+| `moq-client` | Raw-QUIC MoQ subscriber + `--mode publish` |
+| `moq-relay` | Raw-QUIC MoQ relay with pub/sub fanout and synthetic origin |
+| `moq-browser-server` | WebTransport MoQ relay for browsers, shared TLS cert with HTTP/1.1 static file server |
+
+Browser pages (served by `moq-browser-server`):
+- `interop/browser/moq.html` — clock-tick subscribe demo
+- `interop/browser/moq_video.html` — live webcam capture → VP8 encode → MoQ publish → relay fanout → MoQ subscribe → VP8 decode → canvas render
+
+## Wire facts pinned for implementation
 
 ## Wire facts pinned for implementation
 
@@ -177,14 +192,30 @@ Invalid datagram types: `0x22, 0x23, 0x26, 0x27, 0x2A, 0x2B, 0x2E, 0x2F` (STATUS
 | Scenario | SETUP | SUBSCRIBE | Objects |
 | --- | --- | --- | --- |
 | Zig ↔ Zig (raw QUIC, loopback) | ✅ | ✅ | ✅ |
-| Zig client → moq-rs relay | ✅ | ✅ (`subscribe started` logged) | ⚠ blocked by moq-rs publisher auth |
+| Zig client → moq-rs relay | ✅ | ✅ (`subscribe started` logged) | ⚠ blocked by moq-rs publisher auth config |
 | moq-rs client → Zig server | ✅ | n/a (subscriber idle) | n/a |
-| Browser (Chrome) ↔ Zig WT server | ✅ | ✅ | ✅ |
-| Zig pub → Zig relay → Zig sub | ✅ | ✅ | ✅ (built-in origin) |
+| Browser (Chrome/Brave) ↔ Zig WT server (clock tick) | ✅ | ✅ | ✅ |
+| Zig pub → Zig relay → Zig sub (raw QUIC) | ✅ | ✅ | ✅ (built-in origin) |
+| **Browser pub → Zig WT relay → N browser subs (live video)** | ✅ | ✅ | ✅ (6 simultaneous subscribers verified) |
+
+## Video demo architecture
+
+The browser-to-browser live video demo (`moq_video.html` + `moq-browser-server`) uses:
+
+- **Capture**: `getUserMedia({ video: 640x360@30fps })` + `MediaStreamTrackProcessor`
+- **Encode**: WebCodecs `VideoEncoder` with VP8 @ 1 Mbps, `latencyMode: 'realtime'`, keyframe every 30 frames (≈1 s)
+- **MoQ framing**: one subgroup stream per group (keyframe cycle). Publisher writes subgroup header once per stream, then appends `object_id (varint) + payload_len (varint) + [keyframe_flag (1b) + timestamp (varint μs) + VP8 bytes]` per frame. Each new keyframe → close prior stream, open new one. Result: ~1 stream/sec per subscriber instead of 30/sec.
+- **Relay fanout**: parses the subgroup header once on the publisher's stream, opens a matching output stream on each subscriber's WT session with `track_alias` remapped, then forwards raw publisher bytes chunk-by-chunk (incremental, no buffering for FIN)
+- **Decode**: subscriber parses objects incrementally as bytes arrive (no wait-for-FIN), feeds `EncodedVideoChunk` into `VideoDecoder`, draws `VideoFrame` on canvas
+
+The one-stream-per-group design is what allowed scaling past ~1000 frames per subscriber without hitting the QUIC peer's uni stream limit (`MAX_STREAMS_UNI`).
 
 ## Caveats and deferred work
 
 - No AUTHORIZATION_TOKEN policy engine — wire-level decode only.
-- No real media codec; object payloads are opaque bytes.
+- VP8 video is in the demo app only; MoQ core treats object payloads as opaque bytes (as the spec intends: the media codec is not part of MoQ).
 - No moq-lite / warp dialect.
-- Cache policy in relay starts as "last 2 groups LRU" — tunable later.
+- Relay has no explicit group cache — fresh subscribers see video starting from the next keyframe after they join. A "last N groups LRU" cache would shorten join latency.
+- FETCH request/response runtime flow and namespace-discovery streams are codec-only — no runtime handlers yet.
+- Raw QUIC datagram objects (for low-latency frame delivery) require wiring `.quic` protocol datagram dispatch in the event loop — the codec itself is done.
+- moq-rs data-plane interop blocked by their `--auth-public` config rejecting their own `moq-clock` publisher; their relay repeatedly closes the publisher's session with error 0. SETUP + SUBSCRIBE wire compatibility is validated.

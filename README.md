@@ -16,6 +16,7 @@ and goals of this project!
 - **Loss Detection & Congestion Control** (RFC 9002) — CUBIC, PTO, token bucket pacer
 - **HTTP/3** (RFC 9114) — QPACK static table, request/response, priority scheduling (RFC 9218)
 - **WebTransport** (draft-ietf-webtrans-http3) — bidi/uni streams, datagrams, Extended CONNECT, browser support
+- **Media over QUIC** (draft-ietf-moq-transport-17) — wire layer, pub/sub, multi-subscriber relay with alias remapping, live browser video demo (WebCodecs VP8)
 - **HTTP/1.1+TLS** — static file server on TCP, same cert as QUIC, Alt-Svc for HTTP/3 upgrade
 
 ## The Story
@@ -152,6 +153,44 @@ HTML/JS page over HTTPS, then upgrades to WebTransport over QUIC:
 | `static_dir` | *(required)* | Directory to serve files from |
 | `port` | same as QUIC | TCP port override |
 | `alt_svc` | `true` | Send `Alt-Svc: h3=":port"` header |
+
+### Media over QUIC (MoQ Transport draft-17)
+
+Implemented as a set of modules under `src/moq/` and re-exported via `quic.moq`:
+
+```zig
+const quic = @import("quic");
+const wire = quic.moq.wire;        // MoQ leading-ones varint, KV codec, tuples
+const msg = quic.moq.message;       // 18 control message codecs (SETUP, SUBSCRIBE, …)
+const obj = quic.moq.object;        // subgroup/datagram/fetch stream headers
+const track = quic.moq.track;       // TrackNamespace, FilterType, GroupOrder, …
+```
+
+See [`SPEC/DRAFT_IETF_MOQ_TRANSPORT_17.md`](./SPEC/DRAFT_IETF_MOQ_TRANSPORT_17.md) for the
+wire format details and verified interop matrix.
+
+**Live browser video demo** — two Chrome/Brave tabs, one publishing from webcam, the other subscribing:
+
+```bash
+cd interop/browser && ./generate-cert.sh   # once, short-lived ECDSA cert
+zig build run-moq-browser-server           # Zig WT relay on :4433
+# Open https://127.0.0.1:4433/moq_video.html in two tabs.
+# Paste the cert SHA-256 hash from the server's startup banner.
+# Tab A: "Start Publishing (camera)"   Tab B: "Start Subscribing"
+```
+
+Flow: browser camera → `VideoEncoder` (VP8 @ 1 Mbps) → MoQ objects over WebTransport
+uni streams → Zig relay parses subgroup header, remaps `track_alias`, fans out to each
+subscriber's WT session → browser `VideoDecoder` → `<canvas>`. No external MoQ library
+anywhere in the stack.
+
+**Raw-QUIC MoQ (non-browser, ALPN `moqt-17`)**:
+
+```bash
+zig build run-moq-relay                                                          # :4443
+zig build run-moq-client -- --addr 127.0.0.1:4443 --ns live --track camera --mode publish
+zig build run-moq-client -- --addr 127.0.0.1:4443 --ns live --track camera       # subscribe
+```
 
 ### Graceful shutdown
 
@@ -300,6 +339,10 @@ Produces binaries in `zig-out/bin/`:
 | `wt-server` | WebTransport echo server |
 | `wt-client` | WebTransport client |
 | `wt-browser-server` | WebTransport server for browser clients (0.0.0.0:4433) |
+| `moq-server` | MoQ Transport publisher over raw QUIC (ALPN `moqt-17`) |
+| `moq-client` | MoQ Transport client over raw QUIC — subscribe or `--mode publish` |
+| `moq-relay` | MoQ Transport relay over raw QUIC (pub/sub fanout, synthetic origin) |
+| `moq-browser-server` | MoQ Transport relay over WebTransport for browser clients |
 | `interop-server` | QUIC Interop Runner server endpoint |
 | `interop-client` | QUIC Interop Runner client endpoint |
 | `interop-wt-server` | QUIC Interop Runner WebTransport server |
