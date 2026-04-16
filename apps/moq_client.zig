@@ -117,7 +117,7 @@ const MoqClientHandler = struct {
         switch (parsed.env.type) {
             moq_codes.MSG_SUBSCRIBE_OK => {
                 const ok = moq_msg.decodeSubscribeOk(parsed.env.payload) catch return;
-                std.debug.print("[MoQ] SUBSCRIBE_OK alias={d} content_exists={}\n", .{ ok.track_alias, ok.content_exists });
+                std.debug.print("[MoQ] SUBSCRIBE_OK alias={d}\n", .{ok.track_alias});
             },
             moq_codes.MSG_REQUEST_OK => {
                 std.debug.print("[MoQ] REQUEST_OK on stream {d}\n", .{stream_id});

@@ -169,40 +169,70 @@ pub fn decodeRequestError(payload: []const u8) !RequestError {
 }
 
 // SUBSCRIBE (0x03, §9.8) — sent on a bidi request stream.
+//
+// Draft-17 wire format:
+//   request_id (varint)
+//   required_request_id_delta (varint, 0)
+//   track_namespace (tuple)
+//   track_name (varbytes)
+//   parameters: delta-encoded KV list (no count prefix):
+//     0x10 = forward (varint, 1=true)
+//     0x20 = subscriber_priority (varint)
+//     0x21 = filter_type (length-prefixed varint)
+//     0x22 = group_order (varint)
+
+pub const PARAM_FORWARD: u64 = 0x10;
+pub const PARAM_SUBSCRIBER_PRIORITY: u64 = 0x20;
+pub const PARAM_FILTER_TYPE: u64 = 0x21;
+pub const PARAM_GROUP_ORDER: u64 = 0x22;
 
 pub const Subscribe = struct {
+    request_id: track.RequestId = 0,
     track_namespace: []const []const u8,
     track_name: []const u8,
-    subscriber_priority: track.Priority,
-    group_order: track.GroupOrder,
-    filter_type: track.FilterType,
-    start: ?track.Location = null, // for absolute_start/absolute_range
-    end: ?track.Location = null, // for absolute_range only
+    subscriber_priority: track.Priority = 128,
+    group_order: track.GroupOrder = .ascending,
+    filter_type: track.FilterType = .latest_object,
+    forward: bool = true,
 };
 
 pub fn writeSubscribe(writer: anytype, s: Subscribe) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
     const w = fbs.writer();
+    try wire.writeVarInt(w, s.request_id);
+    try wire.writeVarInt(w, 0); // required_request_id_delta
     try wire.writeTuple(w, s.track_namespace);
     try wire.writeVarBytes(w, s.track_name);
-    try w.writeByte(s.subscriber_priority);
-    try w.writeByte(@intFromEnum(s.group_order));
-    try wire.writeVarInt(w, @intFromEnum(s.filter_type));
-    if (s.start) |loc| {
-        try wire.writeVarInt(w, loc.group);
-        try wire.writeVarInt(w, loc.object);
-    }
-    if (s.end) |loc| {
-        try wire.writeVarInt(w, loc.group);
-        try wire.writeVarInt(w, loc.object);
-    }
+
+    // Message parameters: count-prefixed, delta-encoded keys, type-specific values.
+    // moq-rs draft-17: bool/u8 as raw byte, FilterType as length-prefixed varint,
+    // GroupOrder as raw byte (u8 param).
+    try wire.writeVarInt(w, 4); // param count
+    try wire.writeVarInt(w, PARAM_FORWARD); // delta from 0 = 0x10
+    try w.writeByte(if (s.forward) 1 else 0); // bool → raw byte
+    try wire.writeVarInt(w, PARAM_SUBSCRIBER_PRIORITY - PARAM_FORWARD); // delta = 0x10
+    try w.writeByte(s.subscriber_priority); // u8 → raw byte
+    // FilterType: length-prefixed bytes containing the varint value
+    try wire.writeVarInt(w, PARAM_FILTER_TYPE - PARAM_SUBSCRIBER_PRIORITY); // delta = 1
+    var ft_buf: [8]u8 = undefined;
+    var ft_fbs = io.fixedBufferStream(&ft_buf);
+    try wire.writeVarInt(ft_fbs.writer(), @intFromEnum(s.filter_type));
+    try wire.writeVarInt(w, ft_fbs.pos); // length prefix
+    try w.writeAll(ft_buf[0..ft_fbs.pos]); // varint bytes
+    // GroupOrder: raw byte (u8 Param encoding)
+    try wire.writeVarInt(w, PARAM_GROUP_ORDER - PARAM_FILTER_TYPE); // delta = 1
+    try w.writeByte(@intFromEnum(s.group_order)); // u8 → raw byte
+
     try writeEnvelope(writer, codes.MSG_SUBSCRIBE, scratch[0..fbs.pos]);
 }
 
 pub fn decodeSubscribe(payload: []const u8) !Subscribe {
     var fbs = io.fixedBufferStream(payload);
     const reader = fbs.reader();
+
+    const request_id = try wire.readVarInt(reader);
+    _ = try wire.readVarInt(reader); // required_request_id_delta
 
     const count = try wire.readVarInt(reader);
     if (count > wire.MAX_TUPLE_PARTS) return Error.MalformedMessage;
@@ -211,43 +241,48 @@ pub fn decodeSubscribe(payload: []const u8) !Subscribe {
         ns_parts[i] = try wire.readVarBytesZc(&fbs);
     }
     const name = try wire.readVarBytesZc(&fbs);
-    const pri = reader.readByte() catch return wire.Error.BufferTooShort;
-    const go_raw = reader.readByte() catch return wire.Error.BufferTooShort;
-    const ft_raw = try wire.readVarInt(reader);
-    const ft = track.FilterType.fromInt(ft_raw) orelse return Error.MalformedMessage;
 
-    var start: ?track.Location = null;
-    var end: ?track.Location = null;
-    if (ft == .absolute_start or ft == .absolute_range) {
-        start = .{
-            .group = try wire.readVarInt(reader),
-            .object = try wire.readVarInt(reader),
-        };
-    }
-    if (ft == .absolute_range) {
-        end = .{
-            .group = try wire.readVarInt(reader),
-            .object = try wire.readVarInt(reader),
-        };
-    }
-
-    return .{
+    // Parse count-prefixed parameters (delta-encoded keys, type-specific values).
+    var sub = Subscribe{
+        .request_id = request_id,
         .track_namespace = ns_parts[0..@as(usize, @intCast(count))],
         .track_name = name,
-        .subscriber_priority = pri,
-        .group_order = @enumFromInt(go_raw),
-        .filter_type = ft,
-        .start = start,
-        .end = end,
     };
+
+    const param_count = wire.readVarInt(reader) catch return sub;
+    var prev_key: u64 = 0;
+    for (0..@as(usize, @intCast(param_count))) |i| {
+        const delta = wire.readVarInt(reader) catch break;
+        const key = if (i == 0) delta else prev_key + delta;
+        prev_key = key;
+        switch (key) {
+            PARAM_FORWARD => sub.forward = (reader.readByte() catch break) != 0,
+            PARAM_SUBSCRIBER_PRIORITY => sub.subscriber_priority = reader.readByte() catch break,
+            PARAM_FILTER_TYPE => {
+                // Length-prefixed bytes containing varint FilterType.
+                const ft_len = wire.readVarInt(reader) catch break;
+                if (ft_len == 0) break;
+                // Read the inner varint from the prefixed bytes.
+                const ft_val = wire.readVarInt(reader) catch break;
+                sub.filter_type = track.FilterType.fromInt(ft_val) orelse .latest_object;
+            },
+            PARAM_GROUP_ORDER => {
+                // u8 Param encoding = raw byte.
+                sub.group_order = @enumFromInt(reader.readByte() catch break);
+            },
+            else => break,
+        }
+    }
+
+    return sub;
 }
 
 // SUBSCRIBE_OK (0x04, §9.9)
+// Draft-17: no request_id on wire; track_alias + KV parameters.
 
 pub const SubscribeOk = struct {
     track_alias: track.TrackAlias,
-    content_exists: bool = true,
-    largest: ?track.Location = null,
+    group_order: ?track.GroupOrder = null,
 };
 
 pub fn writeSubscribeOk(writer: anytype, s: SubscribeOk) !void {
@@ -255,31 +290,27 @@ pub fn writeSubscribeOk(writer: anytype, s: SubscribeOk) !void {
     var fbs = io.fixedBufferStream(&scratch);
     const w = fbs.writer();
     try wire.writeVarInt(w, s.track_alias);
-    try w.writeByte(if (s.content_exists) 1 else 0);
-    if (s.largest) |loc| {
-        try wire.writeVarInt(w, loc.group);
-        try wire.writeVarInt(w, loc.object);
+    // Parameters
+    if (s.group_order) |go| {
+        try wire.writeVarInt(w, PARAM_GROUP_ORDER); // delta from 0
+        try wire.writeVarInt(w, @intFromEnum(go));
     }
     try writeEnvelope(writer, codes.MSG_SUBSCRIBE_OK, scratch[0..fbs.pos]);
 }
 
 pub fn decodeSubscribeOk(payload: []const u8) !SubscribeOk {
     var fbs = io.fixedBufferStream(payload);
-    const reader = fbs.reader();
-    const alias = try wire.readVarInt(reader);
-    const ce = reader.readByte() catch return wire.Error.BufferTooShort;
-    var largest: ?track.Location = null;
-    if (fbs.pos < payload.len) {
-        largest = .{
-            .group = try wire.readVarInt(reader),
-            .object = try wire.readVarInt(reader),
-        };
+    const alias = try wire.readVarInt(fbs.reader());
+    var result = SubscribeOk{ .track_alias = alias };
+    // Parse optional parameters.
+    var it = wire.KvIterator.init(payload[fbs.pos..]);
+    while (it.next() catch null) |e| {
+        switch (e.key) {
+            PARAM_GROUP_ORDER => result.group_order = @enumFromInt(@as(u8, @intCast(e.value.varint))),
+            else => {},
+        }
     }
-    return .{
-        .track_alias = alias,
-        .content_exists = ce != 0,
-        .largest = largest,
-    };
+    return result;
 }
 
 // REQUEST_UPDATE (0x02, §9.10) — update an existing subscribe
@@ -580,6 +611,8 @@ test "SUBSCRIBE round-trip" {
     try testing.expectEqualStrings("video", s.track_name);
     try testing.expectEqual(@as(u8, 128), s.subscriber_priority);
     try testing.expectEqual(track.FilterType.latest_object, s.filter_type);
+    try testing.expectEqual(track.GroupOrder.ascending, s.group_order);
+    try testing.expect(s.forward);
 }
 
 test "SUBSCRIBE_OK round-trip" {
@@ -587,15 +620,12 @@ test "SUBSCRIBE_OK round-trip" {
     var fbs = io.fixedBufferStream(&buf);
     try writeSubscribeOk(fbs.writer(), .{
         .track_alias = 42,
-        .content_exists = true,
-        .largest = .{ .group = 10, .object = 5 },
+        .group_order = .descending,
     });
     const p = try parseEnvelope(buf[0..fbs.pos]);
     try testing.expectEqual(codes.MSG_SUBSCRIBE_OK, p.env.type);
     const s = try decodeSubscribeOk(p.env.payload);
     try testing.expectEqual(@as(u64, 42), s.track_alias);
-    try testing.expect(s.content_exists);
-    try testing.expectEqual(@as(u64, 10), s.largest.?.group);
 }
 
 test "PUBLISH round-trip" {

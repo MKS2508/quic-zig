@@ -122,7 +122,6 @@ const MoqServerHandler = struct {
         var fbs = std.io.fixedBufferStream(&buf);
         moq_msg.writeSubscribeOk(fbs.writer(), .{
             .track_alias = alias,
-            .content_exists = true,
         }) catch return;
         stream.send.writeData(buf[0..fbs.pos]) catch return;
 

@@ -156,8 +156,6 @@ const MoqHandler = struct {
         var fbs = std.io.fixedBufferStream(&buf);
         moq_msg.writeSubscribeOk(fbs.writer(), .{
             .track_alias = alias,
-            .content_exists = true,
-            .largest = if (self.group_id > 0) .{ .group = self.group_id - 1, .object = 0 } else null,
         }) catch return;
         session.sendStreamData(stream_id, buf[0..fbs.pos]) catch return;
 
