@@ -17,7 +17,7 @@ const moq_codes = quic.moq.message_codes;
 const moq_obj = quic.moq.object;
 const moq_version = quic.moq.version;
 
-pub const std_options: std.Options = .{ .log_level = .err };
+pub const std_options: std.Options = .{ .log_level = .debug };
 
 const StreamRole = enum { control, request, data, unknown };
 
@@ -209,8 +209,23 @@ pub fn main() !void {
         }
     }
 
+    // Build TLS config with both "moqt-17" and "h3" ALPNs.
+    const server_cert_pem = try std.fs.cwd().readFileAlloc(alloc, cert_path, 8192);
+    const server_key_pem = try std.fs.cwd().readFileAlloc(alloc, key_path, 8192);
+    const cert_chain = try tls13.parsePemCertChain(alloc, server_cert_pem);
+    var key_der_buf: [4096]u8 = undefined;
+    const key_der = try tls13.parsePemPrivateKey(server_key_pem, &key_der_buf);
+    const ec_key = tls13.extractEcPrivateKey(key_der) catch try tls13.extractPkcs8EcPrivateKey(key_der);
+    const key_owned = try alloc.dupe(u8, ec_key);
+
+    const alpn = try alloc.alloc([]const u8, 1);
+    alpn[0] = moq_version.ALPN; // "moqt-17"
+
+    var ticket_key: [16]u8 = undefined;
+    std.crypto.random.bytes(&ticket_key);
+
     std.debug.print("\n=== MoQ Server (draft-17, raw QUIC) ===\n", .{});
-    std.debug.print("Listening on 0.0.0.0:{d}\n\n", .{port});
+    std.debug.print("Listening on 0.0.0.0:{d}  ALPN: {s}, h3\n\n", .{ port, moq_version.ALPN });
 
     var handler = MoqServerHandler{};
     var server = try event_loop.Server(MoqServerHandler).init(alloc, &handler, .{
@@ -218,6 +233,12 @@ pub fn main() !void {
         .port = port,
         .cert_path = cert_path,
         .key_path = key_path,
+        .tls_config = .{
+            .cert_chain_der = cert_chain,
+            .private_key_bytes = key_owned,
+            .alpn = alpn,
+            .ticket_key = ticket_key,
+        },
     });
     defer server.deinit();
     try server.run();
