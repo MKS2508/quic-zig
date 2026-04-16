@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoQ Video Demo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0f1117; color: #e1e4e8; padding: 20px; max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 1.3rem; margin-bottom: 16px; color: #58a6ff; }
+  h2 { font-size: 0.95rem; margin-bottom: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; }
+  .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  label { display: block; font-size: 0.8rem; color: #8b949e; margin-bottom: 3px; }
+  input[type="text"] {
+    width: 100%; padding: 7px 10px; background: #0d1117; border: 1px solid #30363d;
+    border-radius: 5px; color: #e1e4e8; font-family: monospace; font-size: 0.85rem; margin-bottom: 8px;
+  }
+  input:focus { outline: none; border-color: #58a6ff; }
+  button {
+    padding: 8px 14px; border: none; border-radius: 5px; font-size: 0.85rem;
+    cursor: pointer; font-weight: 500; margin-right: 6px;
+  }
+  .btn-publish { background: #238636; color: #fff; }
+  .btn-subscribe { background: #1f6feb; color: #fff; }
+  .btn-stop { background: #da3633; color: #fff; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  .status { display: inline-block; padding: 3px 9px; border-radius: 10px; font-size: 0.75rem; margin-left: 8px; }
+  .status-idle { background: #21262d; color: #8b949e; }
+  .status-active { background: #1a3a2a; color: #3fb950; }
+  .status-error { background: #3d1f20; color: #f85149; }
+  .videos { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .video-box { position: relative; background: #000; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; aspect-ratio: 16/9; }
+  .video-box video, .video-box canvas { width: 100%; height: 100%; object-fit: cover; }
+  .video-label { position: absolute; top: 6px; left: 8px; background: rgba(0,0,0,0.7); padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; color: #fff; z-index: 10; }
+  .stats { font-family: monospace; font-size: 0.8rem; color: #8b949e; margin-top: 8px; padding: 8px; background: #0d1117; border-radius: 4px; }
+  #log {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 5px;
+    padding: 10px; height: 180px; overflow-y: auto; font-family: monospace;
+    font-size: 0.75rem; line-height: 1.4;
+  }
+  .log-time { color: #484f58; }
+  .log-info { color: #58a6ff; }
+  .log-send { color: #3fb950; }
+  .log-recv { color: #d2a8ff; }
+  .log-error { color: #f85149; }
+</style>
+</head>
+<body>
+
+<h1>MoQ Video Demo <small style="color:#8b949e;font-size:0.7rem">(draft-17, WebCodecs VP8)</small></h1>
+
+<div class="panel">
+  <h2>Connection</h2>
+  <label>Server URL</label>
+  <input type="text" id="url" value="https://127.0.0.1:4433">
+  <label>Certificate SHA-256 (hex)</label>
+  <input type="text" id="hash" placeholder="paste from server output">
+  <label>Track (namespace,...)/name</label>
+  <input type="text" id="track" value="video/demo,camera">
+  <div style="margin-top:8px">
+    <button class="btn-publish" id="btnPub" onclick="startPublish()">Start Publishing (camera)</button>
+    <button class="btn-subscribe" id="btnSub" onclick="startSubscribe()">Start Subscribing</button>
+    <button class="btn-stop" id="btnStop" onclick="stop()" disabled>Stop</button>
+    <span id="status" class="status status-idle">Idle</span>
+  </div>
+</div>
+
+<div class="videos">
+  <div>
+    <div class="video-box">
+      <div class="video-label">Local camera (publisher)</div>
+      <video id="localVideo" autoplay muted playsinline></video>
+    </div>
+    <div class="stats" id="pubStats">Not publishing</div>
+  </div>
+  <div>
+    <div class="video-box">
+      <div class="video-label">Received (subscriber)</div>
+      <canvas id="remoteCanvas" width="1280" height="720"></canvas>
+    </div>
+    <div class="stats" id="subStats">Not subscribing</div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Log</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+// ─── MoQ wire (leading-ones varint) ───────────────────────────────
+
+function moqVarintEncode(v) {
+  const n = BigInt(v);
+  if (n <= 0x7Fn) return new Uint8Array([Number(n)]);
+  if (n <= 0x3FFFn) { const x = Number(n); return new Uint8Array([0x80 | (x >> 8), x & 0xFF]); }
+  if (n <= 0x1FFFFFn) { const x = Number(n); return new Uint8Array([0xC0 | (x >> 16), (x >> 8) & 0xFF, x & 0xFF]); }
+  if (n <= 0x0FFFFFFFn) { const x = Number(n); return new Uint8Array([0xE0 | (x >> 24), (x >> 16) & 0xFF, (x >> 8) & 0xFF, x & 0xFF]); }
+  if (n <= 0x7FFFFFFFFn) {
+    const b = new Uint8Array(5); b[0] = 0xF0 | Number(n >> 32n);
+    const lo = Number(n & 0xFFFFFFFFn);
+    b[1] = (lo>>24)&0xFF; b[2] = (lo>>16)&0xFF; b[3] = (lo>>8)&0xFF; b[4] = lo&0xFF;
+    return b;
+  }
+  if (n <= 0x3FFFFFFFFFFn) {
+    const b = new Uint8Array(6); b[0] = 0xF8 | Number(n >> 40n);
+    const lo = Number(n & 0xFFFFFFFFFFn);
+    b[1] = (lo>>32)&0xFF;
+    const lo32 = lo & 0xFFFFFFFF;
+    b[2] = (lo32>>24)&0xFF; b[3] = (lo32>>16)&0xFF; b[4] = (lo32>>8)&0xFF; b[5] = lo32&0xFF;
+    return b;
+  }
+  if (n <= 0xFFFFFFFFFFFFFFn) {
+    const b = new Uint8Array(8); b[0] = 0xFE;
+    for (let i = 1; i < 8; i++) b[i] = Number((n >> BigInt((7-i)*8)) & 0xFFn);
+    return b;
+  }
+  const b = new Uint8Array(9); b[0] = 0xFF;
+  for (let i = 1; i < 9; i++) b[i] = Number((n >> BigInt((8-i)*8)) & 0xFFn);
+  return b;
+}
+
+function moqVarintDecode(data, off) {
+  const first = data[off];
+  let leading = 0, mask = 0x80;
+  while (mask && (first & mask)) { leading++; mask >>= 1; }
+  if (leading === 0) return { value: first, len: 1 };
+  if (leading === 6) throw new Error('invalid varint');
+  const totalLen = leading <= 5 ? leading + 1 : (leading === 7 ? 8 : 9);
+  let value = 0n;
+  if (leading <= 5) {
+    value = BigInt(first & ((1 << (7 - leading)) - 1));
+    for (let i = 1; i < totalLen; i++) value = (value << 8n) | BigInt(data[off + i]);
+  } else {
+    for (let i = 1; i < totalLen; i++) value = (value << 8n) | BigInt(data[off + i]);
+  }
+  return { value: Number(value), len: totalLen };
+}
+
+const MSG_SETUP = 0x2F00, MSG_SUBSCRIBE = 0x03, MSG_SUBSCRIBE_OK = 0x04;
+const MSG_PUBLISH = 0x1D, MSG_PUBLISH_OK = 0x1E;
+
+function concat(...arrays) {
+  const total = arrays.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrays) { out.set(a, off); off += a.length; }
+  return out;
+}
+
+function buildEnvelope(type, payload) {
+  const typeBytes = moqVarintEncode(type);
+  const lenBuf = new Uint8Array(2);
+  new DataView(lenBuf.buffer).setUint16(0, payload.length, false);
+  return concat(typeBytes, lenBuf, payload);
+}
+
+function parseEnvelope(data) {
+  const { value: type, len: tl } = moqVarintDecode(data, 0);
+  const len = (data[tl] << 8) | data[tl + 1];
+  return { type, payload: data.slice(tl + 2, tl + 2 + len), consumed: tl + 2 + len };
+}
+
+function encodeVarBytes(str) {
+  const bytes = typeof str === 'string' ? new TextEncoder().encode(str) : str;
+  return concat(moqVarintEncode(bytes.length), bytes);
+}
+
+function encodeTuple(parts) {
+  let out = moqVarintEncode(parts.length);
+  for (const p of parts) out = concat(out, encodeVarBytes(p));
+  return out;
+}
+
+function buildSetup() {
+  let p = new Uint8Array(0);
+  // OPT_MOQT_IMPLEMENTATION = 0x07 (odd → length-prefixed bytes)
+  p = concat(p, moqVarintEncode(0x07), encodeVarBytes("moq-js-video"));
+  return buildEnvelope(MSG_SETUP, p);
+}
+
+function buildSubscribe(nsParts, trackName) {
+  const reqId = moqVarintEncode(0);
+  const reqDelta = moqVarintEncode(0);
+  const ns = encodeTuple(nsParts);
+  const name = encodeVarBytes(trackName);
+  // Count-prefixed params
+  const paramCount = moqVarintEncode(4);
+  // 0x10 forward = true (raw byte)
+  const p1 = concat(moqVarintEncode(0x10), new Uint8Array([1]));
+  // 0x20 (delta 0x10) subscriber_priority (raw byte)
+  const p2 = concat(moqVarintEncode(0x10), new Uint8Array([128]));
+  // 0x21 (delta 1) filter_type (length-prefixed varint)
+  const ft = moqVarintEncode(0x02); // latest_object
+  const p3 = concat(moqVarintEncode(1), moqVarintEncode(ft.length), ft);
+  // 0x22 (delta 1) group_order (raw byte, 1=asc)
+  const p4 = concat(moqVarintEncode(1), new Uint8Array([1]));
+  return buildEnvelope(MSG_SUBSCRIBE, concat(reqId, reqDelta, ns, name, paramCount, p1, p2, p3, p4));
+}
+
+function buildPublish(nsParts, trackName, alias) {
+  const ns = encodeTuple(nsParts);
+  const name = encodeVarBytes(trackName);
+  const aliasBytes = moqVarintEncode(alias);
+  const pri = new Uint8Array([128]);
+  return buildEnvelope(MSG_PUBLISH, concat(ns, name, aliasBytes, pri));
+}
+
+function buildSubgroupHeader(alias, group, subgroup, priority) {
+  // Subgroup type flags: selector(0x10) + explicit id mode (0b10 << 1 = 0x04) + publisher priority present (no 0x20)
+  // 0x10 | 0x04 = 0x14 (explicit subgroup id, priority present, no properties, not end_of_group)
+  // Add end_of_group (0x08) so subscriber knows stream represents complete group
+  const flags = 0x10 | 0x04 | 0x08;
+  return concat(
+    moqVarintEncode(flags),
+    moqVarintEncode(alias),
+    moqVarintEncode(group),
+    moqVarintEncode(subgroup),
+    new Uint8Array([priority]),
+  );
+}
+
+function parseSubgroupHeader(data, off) {
+  const { value: flags, len: fl } = moqVarintDecode(data, off);
+  off += fl;
+  if (!(flags & 0x10)) throw new Error('not subgroup');
+  const { value: alias, len: al } = moqVarintDecode(data, off); off += al;
+  const { value: group, len: gl } = moqVarintDecode(data, off); off += gl;
+  const idMode = (flags >> 1) & 0x03;
+  let subgroup = 0;
+  if (idMode === 2) { const r = moqVarintDecode(data, off); subgroup = r.value; off += r.len; }
+  let priority = null;
+  if (!(flags & 0x20)) { priority = data[off]; off += 1; }
+  return { flags, alias, group, subgroup, priority, consumed: off };
+}
+
+// ─── UI helpers ───────────────────────────────────────────────────
+
+function log(cls, msg) {
+  const el = document.getElementById('log');
+  const t = new Date().toLocaleTimeString();
+  el.innerHTML += `<div><span class="log-time">${t}</span> <span class="${cls}">${msg}</span></div>`;
+  el.scrollTop = el.scrollHeight;
+}
+function setStatus(cls, text) {
+  const el = document.getElementById('status');
+  el.className = 'status status-' + cls;
+  el.textContent = text;
+}
+function setStats(id, text) { document.getElementById(id).textContent = text; }
+
+// ─── Shared connection ────────────────────────────────────────────
+
+let wt = null;
+let mode = null; // 'publish' | 'subscribe'
+let encoder = null, decoder = null;
+let stream = null; // MediaStream (publisher)
+let pubFrames = 0, subFrames = 0, subBytes = 0;
+let startTime = 0;
+
+async function connectWt() {
+  const url = document.getElementById('url').value;
+  const hashHex = document.getElementById('hash').value.trim();
+  if (!hashHex) throw new Error('Paste certificate hash from server');
+  const hashBytes = new Uint8Array(hashHex.match(/.{2}/g).map(h => parseInt(h, 16)));
+  wt = new WebTransport(url, { serverCertificateHashes: [{ algorithm: 'sha-256', value: hashBytes.buffer }] });
+  await wt.ready;
+  log('log-info', `WebTransport connected to ${url}`);
+
+  // MoQ SETUP on uni stream.
+  const ctrl = await wt.createUnidirectionalStream();
+  const ctrlW = ctrl.getWriter();
+  await ctrlW.write(buildSetup());
+  log('log-send', 'Sent SETUP');
+
+  // Read server's SETUP + any incoming uni streams.
+  readIncomingUniStreams();
+
+  wt.closed.then(() => {
+    log('log-info', 'Connection closed');
+    onStopped();
+  }).catch(() => {});
+}
+
+async function readIncomingUniStreams() {
+  const reader = wt.incomingUnidirectionalStreams.getReader();
+  let setupReceived = false;
+  try {
+    while (true) {
+      const { done, value: stream } = await reader.read();
+      if (done) break;
+      (async () => {
+        const sr = stream.getReader();
+        let buf = new Uint8Array(0);
+        try {
+          while (true) {
+            const { done: sd, value: chunk } = await sr.read();
+            if (chunk && chunk.length > 0) {
+              buf = concat(buf, chunk);
+              if (!setupReceived) {
+                try {
+                  const env = parseEnvelope(buf);
+                  if (env.type === MSG_SETUP) {
+                    setupReceived = true;
+                    log('log-recv', 'Received SETUP');
+                    buf = buf.slice(env.consumed);
+                  }
+                } catch (e) {}
+              }
+            }
+            if (sd) break;
+          }
+        } catch (e) {}
+
+        // After FIN: if it's a data stream (subgroup), process for subscriber mode.
+        if (mode === 'subscribe' && buf.length > 0 && setupReceived) {
+          try { handleIncomingSubgroup(buf); } catch (e) { log('log-error', `subgroup: ${e.message}`); }
+        }
+      })();
+    }
+  } catch (e) {}
+}
+
+// ─── Publisher ────────────────────────────────────────────────────
+
+async function startPublish() {
+  document.getElementById('btnPub').disabled = true;
+  document.getElementById('btnSub').disabled = true;
+  document.getElementById('btnStop').disabled = false;
+  mode = 'publish';
+  setStatus('active', 'Publishing');
+  pubFrames = 0;
+  startTime = performance.now();
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360, frameRate: 30 }, audio: false });
+    document.getElementById('localVideo').srcObject = stream;
+    log('log-info', `Got camera: ${stream.getVideoTracks()[0].getSettings().width}x${stream.getVideoTracks()[0].getSettings().height}`);
+
+    await connectWt();
+
+    // Send PUBLISH on bidi stream.
+    const { ns, name } = parseTrack();
+    const bidi = await wt.createBidirectionalStream();
+    const pubW = bidi.writable.getWriter();
+    await pubW.write(buildPublish(ns, name, 1));
+    log('log-send', `Sent PUBLISH ns=[${ns.join(',')}] track=${name} alias=1`);
+
+    // Read PUBLISH_OK on the same bidi stream.
+    (async () => {
+      const rr = bidi.readable.getReader();
+      try {
+        while (true) {
+          const { done, value } = await rr.read();
+          if (done) break;
+          if (value && value.length > 0) {
+            try {
+              const env = parseEnvelope(value);
+              if (env.type === MSG_PUBLISH_OK) log('log-recv', 'PUBLISH_OK');
+              else log('log-recv', `type=0x${env.type.toString(16)}`);
+            } catch (e) {}
+          }
+        }
+      } catch (e) {}
+    })();
+
+    // Set up encoder + frame processing.
+    const track = stream.getVideoTracks()[0];
+    const processor = new MediaStreamTrackProcessor({ track });
+    const reader = processor.readable.getReader();
+
+    let groupId = 0;
+    let frameInGroup = 0;
+    const FRAMES_PER_GROUP = 30; // new keyframe every ~1 sec
+
+    encoder = new VideoEncoder({
+      output: async (chunk, meta) => {
+        try {
+          const isKey = chunk.type === 'key';
+          if (isKey && frameInGroup > 0) { groupId++; frameInGroup = 0; }
+
+          // Write one uni stream per frame: subgroup header + object (timestamp + frame bytes)
+          const s = await wt.createUnidirectionalStream();
+          const w = s.getWriter();
+
+          const hdr = buildSubgroupHeader(1, groupId, frameInGroup, 128);
+          const chunkBytes = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(chunkBytes);
+
+          // Object payload: keyframe flag (1 byte) + timestamp (varint μs) + data
+          const flag = new Uint8Array([isKey ? 1 : 0]);
+          const ts = moqVarintEncode(chunk.timestamp);
+          const objBody = concat(flag, ts, chunkBytes);
+
+          // Object header in stream: object_id varint + payload_len varint + payload
+          const objHdr = concat(moqVarintEncode(frameInGroup), moqVarintEncode(objBody.length));
+          await w.write(concat(hdr, objHdr, objBody));
+          await w.close();
+
+          pubFrames++;
+          frameInGroup++;
+          const elapsed = (performance.now() - startTime) / 1000;
+          setStats('pubStats', `Sent ${pubFrames} frames, ${(pubFrames/elapsed).toFixed(1)} fps, group=${groupId}, key=${isKey}`);
+        } catch (e) {
+          log('log-error', `encode send: ${e.message}`);
+        }
+      },
+      error: (e) => log('log-error', `encoder: ${e.message}`),
+    });
+
+    const settings = track.getSettings();
+    encoder.configure({
+      codec: 'vp8',
+      width: settings.width,
+      height: settings.height,
+      bitrate: 1_000_000,
+      framerate: settings.frameRate || 30,
+      latencyMode: 'realtime',
+    });
+    log('log-info', 'Encoder configured (VP8)');
+
+    // Feed frames to encoder.
+    (async () => {
+      while (true) {
+        const { done, value: videoFrame } = await reader.read();
+        if (done) break;
+        const keyFrame = (pubFrames % FRAMES_PER_GROUP) === 0;
+        encoder.encode(videoFrame, { keyFrame });
+        videoFrame.close();
+      }
+    })();
+
+  } catch (e) {
+    log('log-error', `publish: ${e.message}`);
+    onStopped();
+  }
+}
+
+// ─── Subscriber ───────────────────────────────────────────────────
+
+async function startSubscribe() {
+  document.getElementById('btnPub').disabled = true;
+  document.getElementById('btnSub').disabled = true;
+  document.getElementById('btnStop').disabled = false;
+  mode = 'subscribe';
+  setStatus('active', 'Subscribing');
+  subFrames = 0;
+  subBytes = 0;
+  startTime = performance.now();
+
+  try {
+    await connectWt();
+
+    const { ns, name } = parseTrack();
+    const bidi = await wt.createBidirectionalStream();
+    const subW = bidi.writable.getWriter();
+    await subW.write(buildSubscribe(ns, name));
+    log('log-send', `Sent SUBSCRIBE ns=[${ns.join(',')}] track=${name}`);
+
+    // Read SUBSCRIBE_OK.
+    (async () => {
+      const rr = bidi.readable.getReader();
+      try {
+        while (true) {
+          const { done, value } = await rr.read();
+          if (done) break;
+          if (value && value.length > 0) {
+            try {
+              const env = parseEnvelope(value);
+              if (env.type === MSG_SUBSCRIBE_OK) log('log-recv', 'SUBSCRIBE_OK');
+              else log('log-recv', `type=0x${env.type.toString(16)}`);
+            } catch (e) {}
+          }
+        }
+      } catch (e) {}
+    })();
+
+    // Set up decoder.
+    const canvas = document.getElementById('remoteCanvas');
+    const ctx = canvas.getContext('2d');
+
+    decoder = new VideoDecoder({
+      output: (frame) => {
+        canvas.width = frame.displayWidth;
+        canvas.height = frame.displayHeight;
+        ctx.drawImage(frame, 0, 0);
+        frame.close();
+        subFrames++;
+        const elapsed = (performance.now() - startTime) / 1000;
+        setStats('subStats', `Decoded ${subFrames} frames, ${(subFrames/elapsed).toFixed(1)} fps, ${(subBytes/1024).toFixed(1)} KB`);
+      },
+      error: (e) => log('log-error', `decoder: ${e.message}`),
+    });
+    decoder.configure({ codec: 'vp8' });
+    log('log-info', 'Decoder configured (VP8)');
+
+  } catch (e) {
+    log('log-error', `subscribe: ${e.message}`);
+    onStopped();
+  }
+}
+
+let gotKeyframe = false;
+
+function handleIncomingSubgroup(data) {
+  const hdr = parseSubgroupHeader(data, 0);
+  let off = hdr.consumed;
+  while (off < data.length) {
+    const { value: objId, len: ol } = moqVarintDecode(data, off); off += ol;
+    const { value: payloadLen, len: pl } = moqVarintDecode(data, off); off += pl;
+    if (off + payloadLen > data.length) break;
+    const payload = data.slice(off, off + payloadLen);
+    off += payloadLen;
+    subBytes += payloadLen;
+
+    // Object format: flag(1) + timestamp_varint + codec_data
+    const isKey = payload[0] === 1;
+    const ts = moqVarintDecode(payload, 1);
+    const codecData = payload.slice(1 + ts.len);
+
+    if (!gotKeyframe && !isKey) continue; // wait for keyframe
+    if (isKey) gotKeyframe = true;
+
+    if (decoder && decoder.state === 'configured') {
+      try {
+        decoder.decode(new EncodedVideoChunk({
+          type: isKey ? 'key' : 'delta',
+          timestamp: ts.value,
+          data: codecData,
+        }));
+      } catch (e) {
+        log('log-error', `decode: ${e.message}`);
+        gotKeyframe = false;
+      }
+    }
+  }
+}
+
+// ─── Cleanup ──────────────────────────────────────────────────────
+
+function parseTrack() {
+  const t = document.getElementById('track').value;
+  const slash = t.lastIndexOf('/');
+  const ns = (slash > 0 ? t.slice(0, slash) : 'video').split(',').map(s => s.trim()).filter(Boolean);
+  const name = slash > 0 ? t.slice(slash + 1) : t;
+  return { ns, name };
+}
+
+function stop() {
+  if (encoder) { try { encoder.close(); } catch (e) {} encoder = null; }
+  if (decoder) { try { decoder.close(); } catch (e) {} decoder = null; }
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  if (wt) { try { wt.close(); } catch (e) {} wt = null; }
+  onStopped();
+}
+
+function onStopped() {
+  document.getElementById('btnPub').disabled = false;
+  document.getElementById('btnSub').disabled = false;
+  document.getElementById('btnStop').disabled = true;
+  mode = null;
+  setStatus('idle', 'Idle');
+  gotKeyframe = false;
+}
+</script>
+
+</body>
+</html>

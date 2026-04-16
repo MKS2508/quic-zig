@@ -1,242 +1,385 @@
-// MoQ Transport draft-17 browser demo server.
+// MoQ Transport draft-17 browser relay over WebTransport.
 //
-// Runs a WebTransport server that speaks MoQ Transport:
-//  - Accepts WT sessions on path "/"
-//  - Exchanges MoQ SETUP on control uni streams
-//  - Handles SUBSCRIBE requests on bidi streams
-//  - Publishes a synthetic clock track ("moq/demo" → "clock") that emits
-//    one object per second with an incrementing counter
+// Multi-session WT relay:
+//  - Browsers connect via WT, exchange MoQ SETUP
+//  - Publishers: PUBLISH on bidi + objects on uni streams
+//  - Subscribers: SUBSCRIBE on bidi + receive objects on uni streams
+//  - Relay forwards publisher uni streams to matching subscribers with alias remap
 
 const std = @import("std");
 const quic = @import("quic");
 const event_loop = quic.event_loop;
 const tls13 = quic.tls13;
-const connection = quic.connection;
+const connection_mod = quic.connection;
+const cm = quic.connection_manager;
+const wt = quic.webtransport;
 
-const moq_wire = @import("quic").moq.wire;
-const moq_msg = @import("quic").moq.message;
-const moq_codes = @import("quic").moq.message_codes;
-const moq_obj = @import("quic").moq.object;
-const moq_version = @import("quic").moq.version;
+const moq_wire = quic.moq.wire;
+const moq_msg = quic.moq.message;
+const moq_codes = quic.moq.message_codes;
+const moq_obj = quic.moq.object;
+const moq_version = quic.moq.version;
 
-pub const std_options: std.Options = .{
-    .log_level = .err,
-};
+pub const std_options: std.Options = .{ .log_level = .err };
+
+const MAX_CLIENTS: usize = 8;
+const MAX_TRACKS: usize = 16;
+const MAX_SUBS_PER_TRACK: usize = 8;
+const MAX_STREAMS_PER_CLIENT: usize = 16;
+const STREAM_BUF_SIZE: usize = 200_000; // video frames can be larger than 64KB
 
 const StreamRole = enum { control, request, data, unknown };
 
-const MAX_SUBSCRIBERS: usize = 16;
+const Track = struct {
+    namespace_buf: [256]u8 = undefined,
+    namespace_len: usize = 0,
+    name_buf: [128]u8 = undefined,
+    name_len: usize = 0,
+    publisher_idx: ?usize = null,
+    pub_alias: u64 = 0,
+    active: bool = false,
+    sub_client_idx: [MAX_SUBS_PER_TRACK]usize = [_]usize{0} ** MAX_SUBS_PER_TRACK,
+    sub_alias: [MAX_SUBS_PER_TRACK]u64 = [_]u64{0} ** MAX_SUBS_PER_TRACK,
+    sub_count: usize = 0,
 
-const Subscriber = struct {
-    session_id: u64,
-    bidi_stream_id: u64,
-    track_alias: u64,
-    active: bool = true,
+    fn matchesNsName(self: *const Track, ns: []const u8, name: []const u8) bool {
+        return std.mem.eql(u8, self.namespace_buf[0..self.namespace_len], ns) and
+            std.mem.eql(u8, self.name_buf[0..self.name_len], name);
+    }
 };
 
-const MoqHandler = struct {
-    pub const protocol: event_loop.Protocol = .webtransport;
-
-    // Per-session state — only one session supported for demo.
-    wt_session_id: ?u64 = null,
-    control_stream_out: ?u64 = null,
-    peer_control_stream: ?u64 = null,
+const Client = struct {
+    active: bool = false,
+    entry: ?*cm.ConnEntry = null,
+    wt_session_id: u64 = 0,
+    control_out: ?u64 = null,
     setup_sent: bool = false,
     setup_received: bool = false,
-    subscribers: [MAX_SUBSCRIBERS]Subscriber = undefined,
-    subscriber_count: usize = 0,
-    group_id: u64 = 0,
-    object_id: u64 = 0,
-    last_tick_ns: i128 = 0,
-    stream_roles: [256]StreamRole = [_]StreamRole{.unknown} ** 256,
+    next_alias: u64 = 1,
+    stream_ids: [MAX_STREAMS_PER_CLIENT]u64 = [_]u64{std.math.maxInt(u64)} ** MAX_STREAMS_PER_CLIENT,
+    stream_roles: [MAX_STREAMS_PER_CLIENT]StreamRole = [_]StreamRole{.unknown} ** MAX_STREAMS_PER_CLIENT,
+    stream_bufs: [MAX_STREAMS_PER_CLIENT]StreamBuf = [_]StreamBuf{.{}} ** MAX_STREAMS_PER_CLIENT,
 
-    fn streamIdx(stream_id: u64) ?u8 {
-        if (stream_id >= 256) return null;
-        return @intCast(stream_id);
+    fn findOrAddSlot(self: *Client, sid: u64) ?usize {
+        for (self.stream_ids[0..], 0..) |id, i| {
+            if (id == sid) return i;
+        }
+        for (self.stream_ids[0..], 0..) |id, i| {
+            if (id == std.math.maxInt(u64)) {
+                self.stream_ids[i] = sid;
+                return i;
+            }
+        }
+        return null;
     }
 
-    fn setStreamRole(self: *MoqHandler, stream_id: u64, role: StreamRole) void {
-        if (streamIdx(stream_id)) |idx| self.stream_roles[idx] = role;
+    fn setRole(self: *Client, sid: u64, role: StreamRole) void {
+        if (self.findOrAddSlot(sid)) |i| self.stream_roles[i] = role;
     }
-
-    fn getStreamRole(self: *MoqHandler, stream_id: u64) StreamRole {
-        if (streamIdx(stream_id)) |idx| return self.stream_roles[idx];
+    fn getRole(self: *Client, sid: u64) StreamRole {
+        if (self.findOrAddSlot(sid)) |i| return self.stream_roles[i];
         return .unknown;
     }
-
-    pub fn onConnectRequest(self: *MoqHandler, session: *event_loop.Session, session_id: u64, _: []const u8) void {
-        session.acceptSession(session_id) catch return;
-        self.wt_session_id = session_id;
-
-        // Open our control uni stream and send SETUP.
-        const ctrl_id = session.openUniStream(session_id, 0) catch return;
-        self.control_stream_out = ctrl_id;
-
-        var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        moq_msg.writeSetup(fbs.writer(), .{
-            .implementation = "quic-zig/moq",
-        }) catch return;
-        session.sendStreamData(ctrl_id, buf[0..fbs.pos]) catch return;
-        self.setup_sent = true;
-        std.debug.print("[MoQ] Sent SETUP on uni stream {d}\n", .{ctrl_id});
+    fn buffer(self: *Client, sid: u64) ?*StreamBuf {
+        if (self.findOrAddSlot(sid)) |i| return &self.stream_bufs[i];
+        return null;
     }
-
-    pub fn onUniStream(self: *MoqHandler, _: *event_loop.Session, _: u64, stream_id: u64) void {
-        // Peer-opened uni stream. Could be control (SETUP) or data.
-        // We'll classify on first data.
-        self.setStreamRole(stream_id, .unknown);
-        std.debug.print("[MoQ] Peer opened uni stream {d}\n", .{stream_id});
-    }
-
-    pub fn onBidiStream(self: *MoqHandler, _: *event_loop.Session, _: u64, stream_id: u64) void {
-        self.setStreamRole(stream_id, .request);
-        std.debug.print("[MoQ] Peer opened bidi stream {d}\n", .{stream_id});
-    }
-
-    pub fn onStreamData(self: *MoqHandler, session: *event_loop.Session, stream_id: u64, data: []const u8, _: bool) void {
-        if (data.len == 0) return;
-
-        const role = self.getStreamRole(stream_id);
-        switch (role) {
-            .unknown => {
-                // First data on a peer uni stream — try to parse as control (SETUP).
-                self.handleFirstUniData(session, stream_id, data);
-            },
-            .control => self.handleControlData(data),
-            .request => self.handleRequestData(session, stream_id, data),
-            .data => {},
-        }
-    }
-
-    fn handleFirstUniData(self: *MoqHandler, session: *event_loop.Session, stream_id: u64, data: []const u8) void {
-        const parsed = moq_msg.parseEnvelope(data) catch return;
-        if (parsed.env.type == moq_codes.MSG_SETUP) {
-            self.peer_control_stream = stream_id;
-            self.setStreamRole(stream_id, .control);
-            const opts = moq_msg.decodeSetupPayload(parsed.env.payload) catch return;
-            self.setup_received = true;
-            std.debug.print("[MoQ] Received SETUP", .{});
-            if (opts.implementation) |impl| std.debug.print(" impl=\"{s}\"", .{impl});
-            std.debug.print("\n", .{});
-
-            if (self.setup_sent and self.setup_received) {
-                std.debug.print("[MoQ] Handshake complete\n", .{});
-                // Publish an initial tick immediately.
-                self.publishTick(session);
+    fn clearSlot(self: *Client, sid: u64) void {
+        for (self.stream_ids[0..], 0..) |id, i| {
+            if (id == sid) {
+                self.stream_ids[i] = std.math.maxInt(u64);
+                self.stream_roles[i] = .unknown;
+                self.stream_bufs[i].len = 0;
+                return;
             }
         }
     }
+};
 
-    fn handleControlData(self: *MoqHandler, data: []const u8) void {
-        // Control messages after SETUP (e.g., GOAWAY).
-        const parsed = moq_msg.parseEnvelope(data) catch return;
-        std.debug.print("[MoQ] Control msg type=0x{x} len={d}\n", .{ parsed.env.type, parsed.env.payload.len });
-        _ = self;
+const StreamBuf = struct {
+    data: [STREAM_BUF_SIZE]u8 = undefined,
+    len: usize = 0,
+
+    fn append(self: *StreamBuf, bytes: []const u8) void {
+        const n = @min(bytes.len, self.data.len - self.len);
+        @memcpy(self.data[self.len .. self.len + n], bytes[0..n]);
+        self.len += n;
     }
+    fn reset(self: *StreamBuf) void {
+        self.len = 0;
+    }
+    fn slice(self: *const StreamBuf) []const u8 {
+        return self.data[0..self.len];
+    }
+};
 
-    fn handleRequestData(self: *MoqHandler, session: *event_loop.Session, stream_id: u64, data: []const u8) void {
-        const parsed = moq_msg.parseEnvelope(data) catch return;
-        switch (parsed.env.type) {
-            moq_codes.MSG_SUBSCRIBE => self.handleSubscribe(session, stream_id, parsed.env.payload),
-            else => std.debug.print("[MoQ] Unhandled request type=0x{x} on stream {d}\n", .{ parsed.env.type, stream_id }),
+const RelayHandler = struct {
+    pub const protocol: event_loop.Protocol = .webtransport;
+
+    clients: [MAX_CLIENTS]Client = [_]Client{.{}} ** MAX_CLIENTS,
+    tracks: [MAX_TRACKS]Track = [_]Track{.{}} ** MAX_TRACKS,
+    track_count: usize = 0,
+
+    fn findOrCreateClient(self: *RelayHandler, entry: *cm.ConnEntry) ?usize {
+        for (&self.clients, 0..) |*c, i| {
+            if (c.active and c.entry == entry) return i;
         }
+        for (&self.clients, 0..) |*c, i| {
+            if (!c.active) {
+                c.* = .{ .active = true, .entry = entry };
+                return i;
+            }
+        }
+        return null;
     }
 
-    fn handleSubscribe(self: *MoqHandler, session: *event_loop.Session, stream_id: u64, payload: []const u8) void {
-        const sub = moq_msg.decodeSubscribe(payload) catch return;
-        std.debug.print("[MoQ] SUBSCRIBE ns_parts={d} name=\"{s}\" pri={d}\n", .{
-            sub.track_namespace.len, sub.track_name, sub.subscriber_priority,
-        });
+    fn serializeNs(ns: []const []const u8, buf: []u8) usize {
+        var off: usize = 0;
+        for (ns) |part| {
+            if (off + part.len + 1 > buf.len) break;
+            @memcpy(buf[off .. off + part.len], part);
+            off += part.len;
+            buf[off] = '/';
+            off += 1;
+        }
+        return off;
+    }
 
-        const alias: u64 = self.subscriber_count + 1;
+    fn findTrack(self: *RelayHandler, ns_key: []const u8, name: []const u8) ?usize {
+        for (self.tracks[0..self.track_count], 0..) |*t, i| {
+            if (t.active and t.matchesNsName(ns_key, name)) return i;
+        }
+        return null;
+    }
 
-        // Send SUBSCRIBE_OK on the same bidi stream.
+    pub fn onConnectRequest(self: *RelayHandler, session: *event_loop.Session, session_id: u64, _: []const u8) void {
+        session.acceptSession(session_id) catch return;
+        const ci = self.findOrCreateClient(session.entry) orelse return;
+        self.clients[ci].wt_session_id = session_id;
+
+        const ctrl = session.openUniStream(session_id, 0) catch return;
+        self.clients[ci].control_out = ctrl;
+
         var buf: [256]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buf);
-        moq_msg.writeSubscribeOk(fbs.writer(), .{
-            .track_alias = alias,
-        }) catch return;
-        session.sendStreamData(stream_id, buf[0..fbs.pos]) catch return;
+        moq_msg.writeSetup(fbs.writer(), .{ .implementation = "quic-zig/moq-wt-relay" }) catch return;
+        session.sendStreamData(ctrl, buf[0..fbs.pos]) catch return;
+        self.clients[ci].setup_sent = true;
+        std.debug.print("[relay] client {d} connected (WT session {d})\n", .{ ci, session_id });
+    }
 
-        if (self.subscriber_count < MAX_SUBSCRIBERS) {
-            const sid = self.wt_session_id orelse return;
-            self.subscribers[self.subscriber_count] = .{
-                .session_id = sid,
-                .bidi_stream_id = stream_id,
-                .track_alias = alias,
-            };
-            self.subscriber_count += 1;
+    pub fn onUniStream(_: *RelayHandler, _: *event_loop.Session, _: u64, _: u64) void {}
+
+    pub fn onBidiStream(self: *RelayHandler, session: *event_loop.Session, _: u64, stream_id: u64) void {
+        const ci = self.findOrCreateClient(session.entry) orelse return;
+        self.clients[ci].setRole(stream_id, .request);
+    }
+
+    pub fn onStreamData(self: *RelayHandler, session: *event_loop.Session, stream_id: u64, data: []const u8, fin: bool) void {
+        const ci = self.findOrCreateClient(session.entry) orelse return;
+
+        if (data.len > 0) {
+            const buf = self.clients[ci].buffer(stream_id) orelse return;
+            buf.append(data);
         }
 
-        std.debug.print("[MoQ] Sent SUBSCRIBE_OK alias={d}, subscribers={d}\n", .{ alias, self.subscriber_count });
+        const role = self.clients[ci].getRole(stream_id);
+        switch (role) {
+            .unknown => self.tryParseNewStream(ci, session, stream_id, fin),
+            .control => {},
+            .request => self.tryParseRequest(ci, session, stream_id),
+            .data => self.tryForwardData(ci, stream_id, fin),
+        }
+
+        // Reclaim slot when stream is done — data streams close after each object.
+        if (fin) {
+            const r = self.clients[ci].getRole(stream_id);
+            if (r == .data or r == .unknown) self.clients[ci].clearSlot(stream_id);
+        }
     }
 
-    pub fn onDatagram(_: *MoqHandler, _: *event_loop.Session, _: u64, _: []const u8) void {}
+    fn tryParseNewStream(self: *RelayHandler, ci: usize, session: *event_loop.Session, stream_id: u64, fin: bool) void {
+        // This only runs for peer-initiated UNI streams (bidi streams get .request
+        // set in onBidiStream). Uni streams carry either SETUP (first one) or
+        // object data (subgroup streams).
+        _ = session;
+        const buf = self.clients[ci].buffer(stream_id) orelse return;
+        if (buf.len < 3) return;
 
-    pub fn onSessionDraining(self: *MoqHandler, _: *event_loop.Session, _: u64) void {
-        self.subscriber_count = 0;
-        self.wt_session_id = null;
-        self.setup_sent = false;
-        self.setup_received = false;
-        std.debug.print("[MoQ] Session draining\n", .{});
+        // Peek at the type varint to distinguish SETUP from a subgroup header.
+        // SETUP (0x2F00) is a 2-byte varint; subgroup stream types are single
+        // bytes in 0x10..0x3D. If the first byte has the 0x80 bit set and is
+        // one of the SETUP pattern bytes, treat as control. Otherwise data.
+        var peek = std.io.fixedBufferStream(@as([]const u8, buf.slice()));
+        const first_varint = moq_wire.readVarInt(peek.reader()) catch {
+            self.clients[ci].setRole(stream_id, .data);
+            self.tryForwardData(ci, stream_id, fin);
+            return;
+        };
+
+        if (first_varint == moq_codes.MSG_SETUP) {
+            // Confirm by parsing the full envelope.
+            if (moq_msg.parseEnvelope(buf.slice())) |parsed| {
+                self.clients[ci].setRole(stream_id, .control);
+                self.clients[ci].setup_received = true;
+                std.debug.print("[relay] client {d} SETUP received\n", .{ci});
+                const remaining = buf.slice()[parsed.consumed..];
+                std.mem.copyForwards(u8, &buf.data, remaining);
+                buf.len = remaining.len;
+                return;
+            } else |_| return; // need more data
+        }
+
+        // Data stream (subgroup header).
+        self.clients[ci].setRole(stream_id, .data);
+        self.tryForwardData(ci, stream_id, fin);
     }
 
-    pub fn onPollComplete(self: *MoqHandler, session: *event_loop.Session) void {
-        if (!self.setup_sent or !self.setup_received) return;
-        if (self.subscriber_count == 0) return;
+    fn tryParseRequest(self: *RelayHandler, ci: usize, session: *event_loop.Session, stream_id: u64) void {
+        const buf = self.clients[ci].buffer(stream_id) orelse return;
+        if (buf.len < 3) return;
 
-        const now = std.time.nanoTimestamp();
-        if (self.last_tick_ns == 0) self.last_tick_ns = now;
+        const parsed = moq_msg.parseEnvelope(buf.slice()) catch return;
+        switch (parsed.env.type) {
+            moq_codes.MSG_SUBSCRIBE => self.handleSubscribe(ci, session, stream_id, parsed.env.payload),
+            moq_codes.MSG_PUBLISH => self.handlePublish(ci, session, stream_id, parsed.env.payload),
+            else => std.debug.print("[relay] client {d} request type=0x{x}\n", .{ ci, parsed.env.type }),
+        }
 
-        const elapsed_ns = now - self.last_tick_ns;
-        if (elapsed_ns < 1_000_000_000) return; // 1 second
-        self.last_tick_ns = now;
-
-        self.publishTick(session);
+        const remaining = buf.slice()[parsed.consumed..];
+        std.mem.copyForwards(u8, &buf.data, remaining);
+        buf.len = remaining.len;
     }
 
-    fn publishTick(self: *MoqHandler, session: *event_loop.Session) void {
-        const sid = self.wt_session_id orelse return;
+    fn handleSubscribe(self: *RelayHandler, ci: usize, session: *event_loop.Session, stream_id: u64, payload: []const u8) void {
+        const sub = moq_msg.decodeSubscribe(payload) catch return;
 
-        // Build the payload: "tick N (group G, obj 0)"
-        var payload_buf: [128]u8 = undefined;
-        const payload = std.fmt.bufPrint(&payload_buf, "tick {d} (group {d}, obj 0)", .{ self.group_id, self.group_id }) catch return;
+        var ns_key: [256]u8 = undefined;
+        const ns_len = serializeNs(sub.track_namespace, &ns_key);
+        std.debug.print("[relay] SUBSCRIBE client={d} ns=\"{s}\" track=\"{s}\"\n", .{ ci, ns_key[0..ns_len], sub.track_name });
 
-        // For each subscriber, open a uni stream and send a subgroup header + object.
-        for (self.subscribers[0..self.subscriber_count]) |*sub| {
-            if (!sub.active) continue;
+        const ti = self.findTrack(ns_key[0..ns_len], sub.track_name) orelse blk: {
+            if (self.track_count >= MAX_TRACKS) return;
+            const idx = self.track_count;
+            self.track_count += 1;
+            var t = &self.tracks[idx];
+            t.active = true;
+            @memcpy(t.namespace_buf[0..ns_len], ns_key[0..ns_len]);
+            t.namespace_len = ns_len;
+            @memcpy(t.name_buf[0..sub.track_name.len], sub.track_name);
+            t.name_len = sub.track_name.len;
+            break :blk idx;
+        };
 
-            // Open a uni stream for this subgroup.
-            const data_stream = session.openUniStream(sid, null) catch continue;
+        var t = &self.tracks[ti];
+        if (t.sub_count < MAX_SUBS_PER_TRACK) {
+            const alias = self.clients[ci].next_alias;
+            self.clients[ci].next_alias += 1;
+            t.sub_client_idx[t.sub_count] = ci;
+            t.sub_alias[t.sub_count] = alias;
+            t.sub_count += 1;
 
             var buf: [256]u8 = undefined;
             var fbs = std.io.fixedBufferStream(&buf);
-            const w = fbs.writer();
+            moq_msg.writeSubscribeOk(fbs.writer(), .{ .track_alias = alias }) catch return;
+            session.sendStreamData(stream_id, buf[0..fbs.pos]) catch return;
+            std.debug.print("[relay] SUBSCRIBE_OK → client {d} alias={d} (track {d}, {d} subs, pub={?d})\n", .{
+                ci, alias, ti, t.sub_count, t.publisher_idx,
+            });
+        }
+    }
 
-            // Write subgroup header.
+    fn handlePublish(self: *RelayHandler, ci: usize, session: *event_loop.Session, stream_id: u64, payload: []const u8) void {
+        const pub_msg = moq_msg.decodePublish(payload) catch return;
+
+        var ns_key: [256]u8 = undefined;
+        const ns_len = serializeNs(pub_msg.track_namespace, &ns_key);
+        std.debug.print("[relay] PUBLISH client={d} ns=\"{s}\" track=\"{s}\" alias={d}\n", .{
+            ci, ns_key[0..ns_len], pub_msg.track_name, pub_msg.track_alias,
+        });
+
+        const ti = self.findTrack(ns_key[0..ns_len], pub_msg.track_name) orelse blk: {
+            if (self.track_count >= MAX_TRACKS) return;
+            const idx = self.track_count;
+            self.track_count += 1;
+            break :blk idx;
+        };
+        var t = &self.tracks[ti];
+        t.active = true;
+        @memcpy(t.namespace_buf[0..ns_len], ns_key[0..ns_len]);
+        t.namespace_len = ns_len;
+        @memcpy(t.name_buf[0..pub_msg.track_name.len], pub_msg.track_name);
+        t.name_len = pub_msg.track_name.len;
+        t.publisher_idx = ci;
+        t.pub_alias = pub_msg.track_alias;
+
+        var buf: [256]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buf);
+        moq_msg.writePublishOk(fbs.writer(), .{}) catch return;
+        session.sendStreamData(stream_id, buf[0..fbs.pos]) catch return;
+        std.debug.print("[relay] PUBLISH_OK → client {d} (track {d}, {d} subs)\n", .{ ci, ti, t.sub_count });
+    }
+
+    fn tryForwardData(self: *RelayHandler, ci: usize, stream_id: u64, fin: bool) void {
+        if (!fin) return;
+        const buf = self.clients[ci].buffer(stream_id) orelse return;
+        if (buf.len == 0) return;
+
+        var fbs = std.io.fixedBufferStream(@as([]const u8, buf.slice()));
+        const parsed = moq_obj.readSubgroupHeader(&fbs) catch return;
+        const h = parsed.header;
+
+        // Find the track by publisher alias.
+        var track_idx: ?usize = null;
+        for (self.tracks[0..self.track_count], 0..) |*t, ti| {
+            if (t.active and t.publisher_idx == ci and t.pub_alias == h.track_alias) {
+                track_idx = ti;
+                break;
+            }
+        }
+        const ti = track_idx orelse {
+            buf.reset();
+            return;
+        };
+        const t = &self.tracks[ti];
+
+        const payload = buf.slice()[fbs.pos..];
+        std.debug.print("[relay] forward track={d} group={d} bytes={d} → {d} subs\n", .{
+            ti, h.group, buf.len, t.sub_count,
+        });
+
+        for (0..t.sub_count) |si| {
+            const sub_ci = t.sub_client_idx[si];
+            const sub_alias = t.sub_alias[si];
+            if (!self.clients[sub_ci].active) continue;
+            const sub_entry = self.clients[sub_ci].entry orelse continue;
+            var sub_wtc = if (sub_entry.wt_conn) |*w| w else continue;
+            const sub_sid = self.clients[sub_ci].wt_session_id;
+
+            const out = sub_wtc.openUniStream(sub_sid, null) catch continue;
+
+            var out_buf: [65536]u8 = undefined;
+            var out_fbs = std.io.fixedBufferStream(&out_buf);
+            const w = out_fbs.writer();
+
             moq_obj.writeSubgroupHeader(w, .{
-                .track_alias = sub.track_alias,
-                .group = self.group_id,
-                .subgroup = 0,
-                .publisher_priority = 128,
-                .end_of_group = true,
-                .per_object_properties = false,
+                .track_alias = sub_alias,
+                .group = h.group,
+                .subgroup = h.subgroup,
+                .publisher_priority = h.publisher_priority,
+                .end_of_group = h.end_of_group,
+                .per_object_properties = h.per_object_properties,
             }) catch continue;
-
-            // Write object header: object_id (varint) + payload_len (varint) + payload.
-            moq_wire.writeVarInt(w, 0) catch continue; // object_id
-            moq_wire.writeVarInt(w, payload.len) catch continue; // payload len
             w.writeAll(payload) catch continue;
 
-            session.sendStreamData(data_stream, buf[0..fbs.pos]) catch continue;
-            session.closeStream(data_stream);
+            sub_wtc.sendStreamData(out, out_buf[0..out_fbs.pos]) catch continue;
+            sub_wtc.closeStream(out);
         }
 
-        std.debug.print("[MoQ] Published group {d}, payload: {s}\n", .{ self.group_id, payload });
-        self.group_id += 1;
-        self.object_id = 0;
+        buf.reset();
     }
+
+    pub fn onDatagram(_: *RelayHandler, _: *event_loop.Session, _: u64, _: []const u8) void {}
 };
 
 pub fn main() !void {
@@ -260,28 +403,21 @@ pub fn main() !void {
         }
     }
 
-    // Print certificate SHA-256 hash for browser pinning.
     const server_cert_pem = try std.fs.cwd().readFileAlloc(alloc, cert_path, 8192);
     var cert_der_buf: [4096]u8 = undefined;
     const cert_der = try tls13.parsePemCert(server_cert_pem, &cert_der_buf);
-
     var cert_hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(cert_der, &cert_hash, .{});
-    std.debug.print("\n=== MoQ Transport Browser Demo Server (draft-17) ===\n", .{});
-    std.debug.print("ALPN: {s}\n", .{moq_version.ALPN});
+
+    std.debug.print("\n=== MoQ Browser Relay (draft-17, WebTransport) ===\n", .{});
     std.debug.print("Certificate SHA-256: ", .{});
     for (cert_hash) |byte| std.debug.print("{x:0>2}", .{byte});
-    std.debug.print("\n", .{});
+    std.debug.print("\n\n", .{});
+    _ = moq_version;
 
-    std.debug.print("JS hash: new Uint8Array([", .{});
-    for (cert_hash, 0..) |byte, idx| {
-        if (idx > 0) std.debug.print(", ", .{});
-        std.debug.print("{d}", .{byte});
-    }
-    std.debug.print("])\n\n", .{});
-
-    var handler = MoqHandler{};
-    var server = try event_loop.Server(MoqHandler).init(alloc, &handler, .{
+    const handler = try alloc.create(RelayHandler);
+    handler.* = RelayHandler{};
+    var server = try event_loop.Server(RelayHandler).init(alloc, handler, .{
         .address = "0.0.0.0",
         .port = port,
         .cert_path = cert_path,
@@ -291,7 +427,8 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    std.debug.print("Listening on https://0.0.0.0:{d} (MoQ/WebTransport)\n", .{port});
-    std.debug.print("Open https://localhost:{d}/moq.html in Chrome\n\n", .{port});
+    std.debug.print("Listening on https://0.0.0.0:{d}\n", .{port});
+    std.debug.print("Video demo: https://127.0.0.1:{d}/moq_video.html\n", .{port});
+    std.debug.print("Clock demo: https://127.0.0.1:{d}/moq.html\n\n", .{port});
     try server.run();
 }
