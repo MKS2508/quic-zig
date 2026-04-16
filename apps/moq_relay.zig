@@ -64,6 +64,7 @@ const Track = struct {
     // Subscribers waiting for objects on this track.
     sub_client_idx: [MAX_SUBS_PER_TRACK]usize = [_]usize{0} ** MAX_SUBS_PER_TRACK,
     sub_alias: [MAX_SUBS_PER_TRACK]u64 = [_]u64{0} ** MAX_SUBS_PER_TRACK,
+    sub_pending_initial: [MAX_SUBS_PER_TRACK]bool = [_]bool{false} ** MAX_SUBS_PER_TRACK,
     sub_count: usize = 0,
 
     fn matchesNsName(self: *const Track, ns: []const u8, name: []const u8) bool {
@@ -364,6 +365,7 @@ const RelayHandler = struct {
             self.clients[ci].next_alias += 1;
             t.sub_client_idx[t.sub_count] = ci;
             t.sub_alias[t.sub_count] = alias;
+            t.sub_pending_initial[t.sub_count] = true; // send first tick on next poll
             t.sub_count += 1;
 
             // Send SUBSCRIBE_OK back on the bidi stream.
@@ -380,11 +382,10 @@ const RelayHandler = struct {
 
             // NOTE: we deliberately do NOT publish an object immediately.
             // The subscriber must first read SUBSCRIBE_OK on the bidi stream
-            // to register the track_alias mapping; if we open a uni stream
-            // with that alias too eagerly, the subscriber's alias table is
-            // empty and moq-rs reports "unknown track alias, using request
-            // ID" then drops the stream with "not found". Wait for the
-            // normal onPollComplete tick instead.
+            // to register the track_alias mapping. Marker is set so the
+            // next onPollComplete fires one object to this subscriber;
+            // that gives SUBSCRIBE_OK time to flush to the network before
+            // the uni-stream subgroup data arrives on the wire.
         }
     }
 
@@ -561,10 +562,50 @@ const RelayHandler = struct {
         }
     }
 
+    // Send one synthetic clock object to a specific (track, subscriber).
+    fn sendOneObject(self: *RelayHandler, t: *Track, si: usize, group_id: u64) void {
+        const sub_ci = t.sub_client_idx[si];
+        const sub_alias = t.sub_alias[si];
+        const sub_conn = self.clients[sub_ci].conn orelse return;
+
+        const out = sub_conn.openUniStream() catch return;
+
+        var payload_buf: [128]u8 = undefined;
+        const payload = std.fmt.bufPrint(&payload_buf, "tick {d}", .{group_id}) catch return;
+
+        var buf: [256]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buf);
+        const w = fbs.writer();
+        moq_obj.writeSubgroupHeader(w, .{
+            .track_alias = sub_alias,
+            .group = group_id,
+            .subgroup = 0,
+            .publisher_priority = 128,
+            .end_of_group = true,
+            .per_object_properties = false,
+        }) catch return;
+        moq_wire.writeVarInt(w, 0) catch return;
+        moq_wire.writeVarInt(w, payload.len) catch return;
+        w.writeAll(payload) catch return;
+
+        out.writeData(buf[0..fbs.pos]) catch return;
+        out.close();
+    }
+
     pub fn onPollComplete(self: *RelayHandler, _: *event_loop.Session) void {
-        // Sweep for dead publishers — send PUBLISH_DONE to each subscriber
-        // of their tracks and mark the tracks without a publisher.
         self.sweepDeadPublishers();
+
+        // First: flush any pending-initial subscribers (fire-once-fast so
+        // SUBSCRIBE_OK has time to land on the wire before the first object
+        // arrives on its uni stream).
+        for (self.tracks[0..self.track_count]) |*t| {
+            if (!t.active) continue;
+            for (0..t.sub_count) |si| {
+                if (!t.sub_pending_initial[si]) continue;
+                t.sub_pending_initial[si] = false;
+                self.sendOneObject(t, si, self.group_id);
+            }
+        }
 
         // Check if any track has subscribers.
         var has_subs = false;
@@ -578,39 +619,9 @@ const RelayHandler = struct {
         if (now - self.last_tick_ns < 1_000_000_000) return;
         self.last_tick_ns = now;
 
-        var payload_buf: [128]u8 = undefined;
-        const payload = std.fmt.bufPrint(&payload_buf, "tick {d}", .{self.group_id}) catch return;
-
         for (self.tracks[0..self.track_count]) |*t| {
             if (!t.active or t.sub_count == 0) continue;
-
-            for (0..t.sub_count) |si| {
-                const sub_ci = t.sub_client_idx[si];
-                const sub_alias = t.sub_alias[si];
-                const sub_conn = self.clients[sub_ci].conn orelse continue;
-
-                const out = sub_conn.openUniStream() catch continue;
-
-                var buf: [256]u8 = undefined;
-                var fbs = std.io.fixedBufferStream(&buf);
-                const w = fbs.writer();
-
-                moq_obj.writeSubgroupHeader(w, .{
-                    .track_alias = sub_alias,
-                    .group = self.group_id,
-                    .subgroup = 0,
-                    .publisher_priority = 128,
-                    .end_of_group = true,
-                    .per_object_properties = false,
-                }) catch continue;
-
-                moq_wire.writeVarInt(w, 0) catch continue;
-                moq_wire.writeVarInt(w, payload.len) catch continue;
-                w.writeAll(payload) catch continue;
-
-                out.writeData(buf[0..fbs.pos]) catch continue;
-                out.close();
-            }
+            for (0..t.sub_count) |si| self.sendOneObject(t, si, self.group_id);
         }
 
         std.debug.print("[relay] Published group {d} to {d} tracks\n", .{ self.group_id, self.track_count });
