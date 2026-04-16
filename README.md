@@ -154,44 +154,6 @@ HTML/JS page over HTTPS, then upgrades to WebTransport over QUIC:
 | `port` | same as QUIC | TCP port override |
 | `alt_svc` | `true` | Send `Alt-Svc: h3=":port"` header |
 
-### Media over QUIC (MoQ Transport draft-17)
-
-Implemented as a set of modules under `src/moq/` and re-exported via `quic.moq`:
-
-```zig
-const quic = @import("quic");
-const wire = quic.moq.wire;        // MoQ leading-ones varint, KV codec, tuples
-const msg = quic.moq.message;       // 18 control message codecs (SETUP, SUBSCRIBE, …)
-const obj = quic.moq.object;        // subgroup/datagram/fetch stream headers
-const track = quic.moq.track;       // TrackNamespace, FilterType, GroupOrder, …
-```
-
-See [`SPEC/DRAFT_IETF_MOQ_TRANSPORT_17.md`](./SPEC/DRAFT_IETF_MOQ_TRANSPORT_17.md) for the
-wire format details and verified interop matrix.
-
-**Live browser video demo** — two Chrome/Brave tabs, one publishing from webcam, the other subscribing:
-
-```bash
-cd interop/browser && ./generate-cert.sh   # once, short-lived ECDSA cert
-zig build run-moq-browser-server           # Zig WT relay on :4433
-# Open https://127.0.0.1:4433/moq_video.html in two tabs.
-# Paste the cert SHA-256 hash from the server's startup banner.
-# Tab A: "Start Publishing (camera)"   Tab B: "Start Subscribing"
-```
-
-Flow: browser camera → `VideoEncoder` (VP8 @ 1 Mbps) → MoQ objects over WebTransport
-uni streams → Zig relay parses subgroup header, remaps `track_alias`, fans out to each
-subscriber's WT session → browser `VideoDecoder` → `<canvas>`. No external MoQ library
-anywhere in the stack.
-
-**Raw-QUIC MoQ (non-browser, ALPN `moqt-17`)**:
-
-```bash
-zig build run-moq-relay                                                          # :4443
-zig build run-moq-client -- --addr 127.0.0.1:4443 --ns live --track camera --mode publish
-zig build run-moq-client -- --addr 127.0.0.1:4443 --ns live --track camera       # subscribe
-```
-
 ### Graceful shutdown
 
 The server exposes `stop()` for graceful shutdown — it sends CONNECTION_CLOSE to
@@ -429,6 +391,52 @@ docker build --platform linux/amd64 \
   -t quic-zig-interop:latest \
   -f interop/runner/Dockerfile .
 ```
+
+## Media over QUIC
+
+MoQ Transport (`draft-ietf-moq-transport-17`) is implemented as a set of modules
+under `src/moq/` and re-exported via `quic.moq`. See
+[`SPEC/DRAFT_IETF_MOQ_TRANSPORT_17.md`](./SPEC/DRAFT_IETF_MOQ_TRANSPORT_17.md)
+for the wire format details and verified interop matrix.
+
+### Live browser video demo
+
+Two Chrome/Brave tabs — one publishing from webcam, the other (or many others) subscribing:
+
+```bash
+cd interop/browser && ./generate-cert.sh   # once, short-lived ECDSA cert
+zig build run-moq-browser-server           # Zig WT relay on :4433
+# Open https://127.0.0.1:4433/moq_video.html in two tabs.
+# Paste the cert SHA-256 hash from the server's startup banner.
+# Tab A: "Start Publishing (camera)"   Tab B: "Start Subscribing"
+```
+
+Flow: browser camera → `VideoEncoder` (VP8 @ 1 Mbps) → MoQ objects over
+WebTransport uni streams → Zig relay parses the subgroup header, remaps
+`track_alias`, fans out to each subscriber's WT session → browser `VideoDecoder`
+→ `<canvas>`. No external MoQ library anywhere in the stack. Tested with 6
+simultaneous subscribers on one publisher.
+
+### Raw-QUIC MoQ (non-browser, ALPN `moqt-17`)
+
+```bash
+zig build run-moq-relay                                                          # :4443
+zig build run-moq-client -- --addr 127.0.0.1:4443 --ns live --track camera --mode publish
+zig build run-moq-client -- --addr 127.0.0.1:4443 --ns live --track camera       # subscribe
+```
+
+### Library API
+
+```zig
+const quic = @import("quic");
+const wire = quic.moq.wire;         // MoQ leading-ones varint, KV codec, tuples
+const msg = quic.moq.message;       // 18 control message codecs (SETUP, SUBSCRIBE, …)
+const obj = quic.moq.object;        // subgroup/datagram/fetch stream headers
+const track = quic.moq.track;       // TrackNamespace, FilterType, GroupOrder, …
+```
+
+Apps that don't reference `quic.moq` don't link any MoQ code — Zig's lazy
+semantic analysis strips unused subtrees at compile time.
 
 ## License
 
