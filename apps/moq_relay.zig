@@ -378,8 +378,13 @@ const RelayHandler = struct {
                 ci, alias, ti, t.sub_count,
             });
 
-            // Send an initial tick immediately so subscriber sees data.
-            self.publishToSubscriber(ti, t.sub_count - 1);
+            // NOTE: we deliberately do NOT publish an object immediately.
+            // The subscriber must first read SUBSCRIBE_OK on the bidi stream
+            // to register the track_alias mapping; if we open a uni stream
+            // with that alias too eagerly, the subscriber's alias table is
+            // empty and moq-rs reports "unknown track alias, using request
+            // ID" then drops the stream with "not found". Wait for the
+            // normal onPollComplete tick instead.
         }
     }
 
