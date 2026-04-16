@@ -117,6 +117,14 @@ pub fn build(b: *std.Build) void {
     run_wt_browser.step.dependOn(b.getInstallStep());
     b.step("run-wt-browser-server", "Run WebTransport browser server").dependOn(&run_wt_browser.step);
 
+    // MoQ Transport relay
+    const exe_moq_relay = App.add(b, "moq-relay", "apps/moq_relay.zig", target, optimize, need_libc, lib_mod);
+    b.installArtifact(exe_moq_relay);
+    const run_moq_relay = b.addRunArtifact(exe_moq_relay);
+    run_moq_relay.step.dependOn(b.getInstallStep());
+    if (b.args) |moq_args| run_moq_relay.addArgs(moq_args);
+    b.step("run-moq-relay", "Run MoQ Transport relay").dependOn(&run_moq_relay.step);
+
     // MoQ Transport server (raw QUIC)
     const exe_moq_server = App.add(b, "moq-server", "apps/moq_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_moq_server);

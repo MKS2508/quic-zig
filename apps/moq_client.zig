@@ -21,18 +21,25 @@ pub const std_options: std.Options = .{ .log_level = .err };
 
 const StreamRole = enum { control, request, data, unknown };
 
+const Mode = enum { subscribe, publish };
+
 const MoqClientHandler = struct {
     pub const protocol: event_loop.Protocol = .quic;
 
+    mode: Mode = .subscribe,
     ns_parts: []const []const u8,
     track_name: []const u8,
 
     control_out: ?u64 = null,
     peer_control: ?u64 = null,
     subscribe_bidi: ?u64 = null,
+    publish_bidi: ?u64 = null,
     setup_sent: bool = false,
     setup_received: bool = false,
     subscribed: bool = false,
+    published: bool = false,
+    group_id: u64 = 0,
+    last_tick_ns: i128 = 0,
     objects_received: u64 = 0,
 
     stream_roles: [256]StreamRole = [_]StreamRole{.unknown} ** 256,
@@ -96,8 +103,11 @@ const MoqClientHandler = struct {
             if (opts.implementation) |impl| std.debug.print(" impl=\"{s}\"", .{impl});
             std.debug.print("\n", .{});
 
-            if (self.setup_sent and self.setup_received and !self.subscribed) {
-                self.sendSubscribe(session);
+            if (self.setup_sent and self.setup_received) {
+                switch (self.mode) {
+                    .subscribe => if (!self.subscribed) self.sendSubscribe(session),
+                    .publish => if (!self.published) self.sendPublish(session),
+                }
             }
         } else {
             // Some other message on a new stream — probably a bidi request response.
@@ -185,7 +195,57 @@ const MoqClientHandler = struct {
         std.debug.print("[MoQ] Sent SUBSCRIBE on bidi stream {d}\n", .{bidi});
     }
 
-    pub fn onPollComplete(_: *MoqClientHandler, _: *event_loop.ClientSession) void {}
+    fn sendPublish(self: *MoqClientHandler, session: *event_loop.ClientSession) void {
+        const bidi = session.openStream() catch return;
+        self.publish_bidi = bidi;
+        self.setRole(bidi, .request);
+        self.published = true;
+
+        var buf: [512]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buf);
+        moq_msg.writePublish(fbs.writer(), .{
+            .track_namespace = self.ns_parts,
+            .track_name = self.track_name,
+            .track_alias = 1,
+            .publisher_priority = 128,
+        }) catch return;
+        session.writeStream(bidi, buf[0..fbs.pos]) catch return;
+        std.debug.print("[MoQ] Sent PUBLISH on bidi stream {d}\n", .{bidi});
+    }
+
+    pub fn onPollComplete(self: *MoqClientHandler, session: *event_loop.ClientSession) void {
+        if (self.mode != .publish or !self.published) return;
+
+        const now: i128 = std.time.nanoTimestamp();
+        if (self.last_tick_ns == 0) self.last_tick_ns = now;
+        if (now - self.last_tick_ns < 1_000_000_000) return;
+        self.last_tick_ns = now;
+
+        // Publish a tick object on a new uni stream.
+        const out_id = session.openQuicUniStream() catch return;
+        var payload_buf: [128]u8 = undefined;
+        const payload = std.fmt.bufPrint(&payload_buf, "pub tick {d}", .{self.group_id}) catch return;
+
+        var buf: [256]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buf);
+        const w = fbs.writer();
+        moq_obj.writeSubgroupHeader(w, .{
+            .track_alias = 1,
+            .group = self.group_id,
+            .subgroup = 0,
+            .publisher_priority = 128,
+            .end_of_group = true,
+            .per_object_properties = false,
+        }) catch return;
+        moq_wire.writeVarInt(w, 0) catch return;
+        moq_wire.writeVarInt(w, payload.len) catch return;
+        w.writeAll(payload) catch return;
+
+        session.writeStream(out_id, buf[0..fbs.pos]) catch return;
+        session.closeQuicStream(out_id);
+        std.debug.print("[MoQ] Published tick {d}\n", .{self.group_id});
+        self.group_id += 1;
+    }
 };
 
 pub fn main() !void {
@@ -198,13 +258,13 @@ pub fn main() !void {
     var server_name: []const u8 = "localhost";
     var ns_str: []const u8 = "moq-clock";
     var track_name: []const u8 = "seconds";
+    var mode: Mode = .subscribe;
 
     var args = std.process.args();
     _ = args.next();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--addr")) {
             if (args.next()) |v| {
-                // Parse "host:port".
                 if (std.mem.lastIndexOf(u8, v, ":")) |colon| {
                     address = v[0..colon];
                     port = std.fmt.parseInt(u16, v[colon + 1 ..], 10) catch 4443;
@@ -218,6 +278,10 @@ pub fn main() !void {
             if (args.next()) |v| track_name = v;
         } else if (std.mem.eql(u8, arg, "--server-name")) {
             if (args.next()) |v| server_name = v;
+        } else if (std.mem.eql(u8, arg, "--mode")) {
+            if (args.next()) |v| {
+                if (std.mem.eql(u8, v, "publish")) mode = .publish;
+            }
         }
     }
 
@@ -238,6 +302,7 @@ pub fn main() !void {
     std.debug.print("] / {s}\n\n", .{track_name});
 
     var handler = MoqClientHandler{
+        .mode = mode,
         .ns_parts = ns_list.items,
         .track_name = track_name,
     };
