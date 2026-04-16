@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoQ Transport Test</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #0f1117; color: #e1e4e8; padding: 24px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin-bottom: 20px; color: #58a6ff; }
+  h2 { font-size: 1rem; margin-bottom: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; }
+  .panel { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 0.85rem; color: #8b949e; margin-bottom: 4px; }
+  input[type="text"] {
+    width: 100%; padding: 8px 12px; background: #0d1117; border: 1px solid #30363d;
+    border-radius: 6px; color: #e1e4e8; font-family: monospace; font-size: 0.9rem; margin-bottom: 10px;
+  }
+  input:focus { outline: none; border-color: #58a6ff; }
+  button {
+    padding: 8px 16px; border: none; border-radius: 6px; font-size: 0.85rem;
+    cursor: pointer; font-weight: 500; transition: background 0.15s;
+  }
+  .btn-primary { background: #238636; color: #fff; }
+  .btn-primary:hover { background: #2ea043; }
+  .btn-primary:disabled { background: #1a3a2a; color: #4a7a5a; cursor: default; }
+  .btn-danger { background: #da3633; color: #fff; }
+  .btn-danger:hover { background: #f85149; }
+  .btn-send { background: #1f6feb; color: #fff; }
+  .btn-send:hover { background: #388bfd; }
+  .btn-send:disabled { background: #152a4a; color: #3a6a9a; cursor: default; }
+  .status { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 500; margin-left: 10px; }
+  .status-disconnected { background: #3d1f20; color: #f85149; }
+  .status-connecting { background: #3d2f00; color: #d29922; }
+  .status-connected { background: #1a3a2a; color: #3fb950; }
+  #log {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+    padding: 12px; height: 300px; overflow-y: auto; font-family: monospace;
+    font-size: 0.8rem; line-height: 1.5;
+  }
+  .log-time { color: #484f58; }
+  .log-info { color: #58a6ff; }
+  .log-send { color: #3fb950; }
+  .log-recv { color: #d2a8ff; }
+  .log-error { color: #f85149; }
+  #objects {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+    padding: 12px; max-height: 300px; overflow-y: auto; font-family: monospace;
+    font-size: 0.85rem; line-height: 1.6;
+  }
+  .obj-entry { padding: 4px 0; border-bottom: 1px solid #21262d; color: #d2a8ff; }
+  .obj-entry:last-child { border-bottom: none; }
+  .obj-group { color: #3fb950; }
+  .obj-payload { color: #e1e4e8; }
+</style>
+</head>
+<body>
+
+<h1>MoQ Transport Test Client <small style="color:#8b949e;font-size:0.75rem">(draft-17)</small></h1>
+
+<div class="panel">
+  <h2>Connection <span id="status" class="status status-disconnected">Disconnected</span></h2>
+  <label for="url">Server URL</label>
+  <input type="text" id="url" value="https://127.0.0.1:4433">
+  <label for="hash">Certificate SHA-256 (hex)</label>
+  <input type="text" id="hash" placeholder="paste hex hash from server output">
+  <label for="trackns">Track Namespace (comma-separated)</label>
+  <input type="text" id="trackns" value="moq,demo">
+  <label for="trackname">Track Name</label>
+  <input type="text" id="trackname" value="clock">
+  <div style="display:flex;gap:10px;margin-top:8px;">
+    <button id="btnConnect" class="btn-primary" onclick="doConnect()">Connect &amp; Subscribe</button>
+    <button id="btnDisconnect" class="btn-danger" onclick="doDisconnect()" disabled>Disconnect</button>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Received Objects</h2>
+  <div id="objects"><em style="color:#484f58">No objects yet — connect and subscribe to start receiving.</em></div>
+</div>
+
+<div class="panel">
+  <h2>Log</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+// ── MoQ leading-ones varint ──────────────────────────────────────────
+
+function moqVarintEncode(value) {
+  if (value < 0) throw new Error('negative varint');
+  const n = BigInt(value);
+  if (n <= 0x7Fn) return new Uint8Array([Number(n)]);
+  if (n <= 0x3FFFn) {
+    const v = Number(n);
+    return new Uint8Array([0x80 | (v >> 8), v & 0xFF]);
+  }
+  if (n <= 0x1FFFFFn) {
+    const v = Number(n);
+    return new Uint8Array([0xC0 | (v >> 16), (v >> 8) & 0xFF, v & 0xFF]);
+  }
+  if (n <= 0x0FFFFFFFn) {
+    const v = Number(n);
+    return new Uint8Array([0xE0 | (v >> 24), (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF]);
+  }
+  // For larger values use DataView
+  if (n <= 0x7FFFFFFFFn) {
+    const buf = new Uint8Array(5);
+    buf[0] = 0xF0 | Number(n >> 32n);
+    const lo = Number(n & 0xFFFFFFFFn);
+    buf[1] = (lo >> 24) & 0xFF; buf[2] = (lo >> 16) & 0xFF; buf[3] = (lo >> 8) & 0xFF; buf[4] = lo & 0xFF;
+    return buf;
+  }
+  if (n <= 0x3FFFFFFFFFFn) {
+    const buf = new Uint8Array(6);
+    buf[0] = 0xF8 | Number(n >> 40n);
+    const lo = Number(n & 0xFFFFFFFFFFn);
+    buf[1] = (lo >> 32) & 0xFF;
+    const lo32 = lo & 0xFFFFFFFF;
+    buf[2] = (lo32 >> 24); buf[3] = (lo32 >> 16) & 0xFF; buf[4] = (lo32 >> 8) & 0xFF; buf[5] = lo32 & 0xFF;
+    return buf;
+  }
+  if (n <= 0xFFFFFFFFFFFFFFn) {
+    const buf = new Uint8Array(8);
+    buf[0] = 0xFE;
+    for (let i = 1; i < 8; i++) buf[i] = Number((n >> BigInt((7-i)*8)) & 0xFFn);
+    return buf;
+  }
+  const buf = new Uint8Array(9);
+  buf[0] = 0xFF;
+  for (let i = 1; i < 9; i++) buf[i] = Number((n >> BigInt((8-i)*8)) & 0xFFn);
+  return buf;
+}
+
+function moqVarintDecode(data, offset) {
+  const first = data[offset];
+  let leading = 0;
+  let mask = 0x80;
+  while (mask && (first & mask)) { leading++; mask >>= 1; }
+
+  if (leading === 0) return { value: first, len: 1 };
+  if (leading === 6) throw new Error('invalid varint (7-byte)');
+
+  const totalLen = leading <= 5 ? leading + 1 : (leading === 7 ? 8 : 9);
+  let value = 0n;
+  if (leading <= 5) {
+    const valueBits = first & ((1 << (7 - leading)) - 1);
+    value = BigInt(valueBits);
+    for (let i = 1; i < totalLen; i++) value = (value << 8n) | BigInt(data[offset + i]);
+  } else if (leading === 7) {
+    for (let i = 1; i < 8; i++) value = (value << 8n) | BigInt(data[offset + i]);
+  } else {
+    for (let i = 1; i < 9; i++) value = (value << 8n) | BigInt(data[offset + i]);
+  }
+  return { value: Number(value), len: totalLen };
+}
+
+// ── Message helpers ──────────────────────────────────────────────────
+
+const MSG_SETUP = 0x2F00;
+const MSG_SUBSCRIBE = 0x03;
+const MSG_SUBSCRIBE_OK = 0x04;
+
+function buildEnvelope(type, payload) {
+  const typeBytes = moqVarintEncode(type);
+  const lenBuf = new Uint8Array(2);
+  new DataView(lenBuf.buffer).setUint16(0, payload.length, false);
+  const out = new Uint8Array(typeBytes.length + 2 + payload.length);
+  out.set(typeBytes, 0);
+  out.set(lenBuf, typeBytes.length);
+  out.set(payload, typeBytes.length + 2);
+  return out;
+}
+
+function parseEnvelope(data) {
+  const { value: type, len: tl } = moqVarintDecode(data, 0);
+  const payloadLen = (data[tl] << 8) | data[tl + 1];
+  const payload = data.slice(tl + 2, tl + 2 + payloadLen);
+  return { type, payload, consumed: tl + 2 + payloadLen };
+}
+
+function concat(...arrays) {
+  const total = arrays.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrays) { out.set(a, off); off += a.length; }
+  return out;
+}
+
+function encodeVarBytes(str) {
+  const bytes = new TextEncoder().encode(str);
+  return concat(moqVarintEncode(bytes.length), bytes);
+}
+
+function encodeTuple(parts) {
+  let out = moqVarintEncode(parts.length);
+  for (const p of parts) out = concat(out, encodeVarBytes(p));
+  return out;
+}
+
+// Delta-encoded KV pair list for setup options
+function encodeKvList(entries) {
+  let out = new Uint8Array(0);
+  let prev = 0;
+  let first = true;
+  for (const [key, value] of entries) {
+    const delta = first ? key : key - prev;
+    out = concat(out, moqVarintEncode(delta));
+    if (key % 2 === 0) {
+      out = concat(out, moqVarintEncode(value));
+    } else {
+      const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+      out = concat(out, moqVarintEncode(bytes.length), bytes);
+    }
+    prev = key;
+    first = false;
+  }
+  return out;
+}
+
+function buildSetup() {
+  const payload = encodeKvList([[0x07, 'moq-js-browser']]);
+  return buildEnvelope(MSG_SETUP, payload);
+}
+
+function buildSubscribe(nsParts, trackName) {
+  const ns = encodeTuple(nsParts);
+  const name = encodeVarBytes(trackName);
+  const priority = new Uint8Array([128]);
+  const groupOrder = new Uint8Array([0x01]); // ascending
+  const filterType = moqVarintEncode(0x02); // latest_object
+  const payload = concat(ns, name, priority, groupOrder, filterType);
+  return buildEnvelope(MSG_SUBSCRIBE, payload);
+}
+
+// ── Connection state ─────────────────────────────────────────────────
+
+let wt = null;
+let controlWriter = null;
+
+function log(cls, msg) {
+  const el = document.getElementById('log');
+  const t = new Date().toLocaleTimeString();
+  el.innerHTML += `<div><span class="log-time">${t}</span> <span class="${cls}">${msg}</span></div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(cls, text) {
+  const el = document.getElementById('status');
+  el.className = 'status status-' + cls;
+  el.textContent = text;
+}
+
+function addObject(group, obj, payload) {
+  const el = document.getElementById('objects');
+  if (el.querySelector('em')) el.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'obj-entry';
+  div.innerHTML = `<span class="obj-group">group ${group} obj ${obj}</span> → <span class="obj-payload">${payload}</span>`;
+  el.prepend(div);
+  while (el.children.length > 100) el.removeChild(el.lastChild);
+}
+
+async function doConnect() {
+  const url = document.getElementById('url').value;
+  const hashHex = document.getElementById('hash').value.trim();
+  const nsParts = document.getElementById('trackns').value.split(',').map(s => s.trim()).filter(Boolean);
+  const trackName = document.getElementById('trackname').value.trim();
+
+  if (!hashHex) { log('log-error', 'Paste the certificate SHA-256 hash from server output'); return; }
+
+  const hashBytes = new Uint8Array(hashHex.match(/.{2}/g).map(h => parseInt(h, 16)));
+
+  setStatus('connecting', 'Connecting...');
+  log('log-info', `Connecting to ${url}`);
+
+  try {
+    wt = new WebTransport(url, {
+      serverCertificateHashes: [{ algorithm: 'sha-256', value: hashBytes.buffer }]
+    });
+    await wt.ready;
+    setStatus('connected', 'Connected');
+    log('log-info', 'WebTransport connected');
+    document.getElementById('btnConnect').disabled = true;
+    document.getElementById('btnDisconnect').disabled = false;
+
+    // Open control uni stream and send SETUP.
+    const ctrl = await wt.createUnidirectionalStream();
+    controlWriter = ctrl.getWriter();
+    const setupMsg = buildSetup();
+    await controlWriter.write(setupMsg);
+    log('log-send', `Sent SETUP (${setupMsg.length} bytes)`);
+
+    // Listen for server's control uni stream (SETUP response).
+    readIncomingUniStreams(wt, nsParts, trackName);
+
+    wt.closed.then(() => {
+      setStatus('disconnected', 'Disconnected');
+      log('log-info', 'Connection closed');
+      document.getElementById('btnConnect').disabled = false;
+      document.getElementById('btnDisconnect').disabled = true;
+    });
+
+  } catch (e) {
+    setStatus('disconnected', 'Disconnected');
+    log('log-error', `Connection failed: ${e.message}`);
+    // Try to get closed info for better diagnostics.
+    if (wt) {
+      try {
+        const info = await wt.closed;
+        log('log-error', `Close info: code=${info.closeCode} reason="${info.reason}"`);
+      } catch (ce) {
+        log('log-error', `Close error: ${ce.message}`);
+      }
+    }
+    document.getElementById('btnConnect').disabled = false;
+  }
+}
+
+async function readIncomingUniStreams(transport, nsParts, trackName) {
+  const reader = transport.incomingUnidirectionalStreams.getReader();
+  let setupReceived = false;
+  let subscribed = false;
+
+  try {
+    while (true) {
+      const { done, value: stream } = await reader.read();
+      if (done) break;
+
+      // Process each stream in its own async context.
+      (async () => {
+        const sr = stream.getReader();
+        let buf = new Uint8Array(0);
+        let isControl = false;
+
+        try {
+          while (true) {
+            const { done: sd, value: chunk } = await sr.read();
+            if (chunk && chunk.length > 0) {
+              buf = concat(buf, chunk);
+
+              // Try to process available data immediately (don't wait for FIN).
+              if (!setupReceived && !isControl) {
+                try {
+                  const env = parseEnvelope(buf);
+                  if (env.type === MSG_SETUP) {
+                    setupReceived = true;
+                    isControl = true;
+                    log('log-recv', `Received SETUP (${env.consumed} bytes)`);
+                    buf = buf.slice(env.consumed);
+
+                    if (!subscribed) {
+                      subscribed = true;
+                      sendSubscribe(transport, nsParts, trackName);
+                    }
+                  }
+                } catch (e) {
+                  // Not enough data yet or not a SETUP — keep buffering.
+                }
+              } else if (!isControl) {
+                // Data stream (subgroup) — process once we have enough.
+                try {
+                  parseSubgroupStream(buf);
+                  buf = new Uint8Array(0);
+                } catch (e) {
+                  // Keep buffering until we have a complete header + object.
+                }
+              }
+            }
+            if (sd) break;
+          }
+        } catch (e) {
+          // Stream closed or errored.
+        }
+
+        // Process remaining data after stream closes (data streams get FIN).
+        if (buf.length > 0 && !isControl) {
+          try {
+            parseSubgroupStream(buf);
+          } catch (e) {
+            log('log-warn', `Data stream parse: ${e.message} (${buf.length} bytes)`);
+          }
+        }
+      })();
+    }
+  } catch (e) {
+    if (e.name !== 'InvalidStateError') log('log-error', `Uni stream reader error: ${e.message}`);
+  }
+}
+
+async function sendSubscribe(transport, nsParts, trackName) {
+  const bidi = await transport.createBidirectionalStream();
+  const w = bidi.writable.getWriter();
+  const subMsg = buildSubscribe(nsParts, trackName);
+  await w.write(subMsg);
+  log('log-send', `Sent SUBSCRIBE ns=[${nsParts.join(',')}] track="${trackName}"`);
+
+  // Read response on the bidi stream.
+  const rr = bidi.readable.getReader();
+  try {
+    while (true) {
+      const { done: bd, value: bchunk } = await rr.read();
+      if (bd) break;
+      if (!bchunk || bchunk.length === 0) continue;
+      try {
+        const resp = parseEnvelope(bchunk);
+        if (resp.type === MSG_SUBSCRIBE_OK) {
+          const { value: alias } = moqVarintDecode(resp.payload, 0);
+          log('log-recv', `Received SUBSCRIBE_OK alias=${alias}`);
+        } else {
+          log('log-recv', `Received response type=0x${resp.type.toString(16)}`);
+        }
+      } catch (pe) {
+        log('log-warn', `Parse error on bidi: ${pe.message}`);
+      }
+    }
+  } catch (e) {}
+}
+
+function parseSubgroupStream(data) {
+  let off = 0;
+  // Read flags varint (subgroup stream type).
+  const { value: flags, len: fl } = moqVarintDecode(data, off);
+  off += fl;
+
+  // Check selector bit (0x10 must be set for subgroup).
+  if (!(flags & 0x10)) {
+    log('log-recv', `Non-subgroup uni stream type=0x${flags.toString(16)}`);
+    return;
+  }
+
+  // Track alias.
+  const { value: trackAlias, len: al } = moqVarintDecode(data, off);
+  off += al;
+
+  // Group ID.
+  const { value: groupId, len: gl } = moqVarintDecode(data, off);
+  off += gl;
+
+  // Subgroup ID (depends on SUBGROUP_ID_MODE bits 1-2).
+  const idMode = (flags >> 1) & 0x03;
+  let subgroupId = 0;
+  if (idMode === 2) {
+    const { value: sg, len: sgl } = moqVarintDecode(data, off);
+    off += sgl;
+    subgroupId = sg;
+  }
+
+  // Publisher Priority (absent if DEFAULT_PRIORITY bit 5 set).
+  let priority = null;
+  if (!(flags & 0x20)) {
+    priority = data[off];
+    off += 1;
+  }
+
+  log('log-recv', `Subgroup: alias=${trackAlias} group=${groupId} sub=${subgroupId} pri=${priority} eog=${!!(flags & 0x08)}`);
+
+  // Read objects until end of buffer.
+  while (off < data.length) {
+    const { value: objId, len: ol } = moqVarintDecode(data, off);
+    off += ol;
+    if (off >= data.length) break;
+
+    const { value: payloadLen, len: pl } = moqVarintDecode(data, off);
+    off += pl;
+
+    const payload = data.slice(off, off + payloadLen);
+    off += payloadLen;
+
+    const text = new TextDecoder().decode(payload);
+    addObject(groupId, objId, text);
+    log('log-recv', `Object: group=${groupId} obj=${objId} payload="${text}"`);
+  }
+}
+
+function doDisconnect() {
+  if (wt) {
+    wt.close();
+    wt = null;
+  }
+}
+</script>
+
+</body>
+</html>

@@ -13,3 +13,11 @@ pub const qpack = @import("h3/qpack.zig");
 pub const webtransport = @import("webtransport/session.zig");
 pub const quic_lb = @import("quic/quic_lb.zig");
 pub const event_loop = @import("event_loop.zig");
+pub const moq = struct {
+    pub const wire = @import("moq/wire.zig");
+    pub const message = @import("moq/message.zig");
+    pub const message_codes = @import("moq/message_codes.zig");
+    pub const object = @import("moq/object.zig");
+    pub const track = @import("moq/track.zig");
+    pub const version = @import("moq/version.zig");
+};

@@ -117,6 +117,14 @@ pub fn build(b: *std.Build) void {
     run_wt_browser.step.dependOn(b.getInstallStep());
     b.step("run-wt-browser-server", "Run WebTransport browser server").dependOn(&run_wt_browser.step);
 
+    // MoQ Transport browser demo server
+    const exe_moq_browser = App.add(b, "moq-browser-server", "apps/moq_browser_server.zig", target, optimize, need_libc, lib_mod);
+    b.installArtifact(exe_moq_browser);
+    const run_moq_browser = b.addRunArtifact(exe_moq_browser);
+    run_moq_browser.step.dependOn(b.getInstallStep());
+    if (b.args) |moq_args| run_moq_browser.addArgs(moq_args);
+    b.step("run-moq-browser-server", "Run MoQ Transport browser demo server").dependOn(&run_moq_browser.step);
+
     // WebTransport echo server (production deployment)
     const exe_wt_echo = App.add(b, "wt-echo-server", "apps/wt_echo_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_wt_echo);
