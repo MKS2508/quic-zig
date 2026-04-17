@@ -256,7 +256,7 @@ pub const PacketPacker = struct {
 
         // We build the packet in a temporary buffer, then encrypt into buf
         var tmp: [ABSOLUTE_MAX_PACKET_SIZE]u8 = undefined;
-        // Account for output buffer size: encrypted output = fbs.pos + AEAD_TAG_LEN
+        // Account for output buffer size: encrypted output = fbs.seek + AEAD_TAG_LEN
         const effective_max = @min(self.max_packet_size, @min(tmp.len, buf.len -| AEAD_TAG_LEN));
         var fbs = io.fixedBufferStream(tmp[0..effective_max]);
         const writer = fbs.writer();
@@ -310,16 +310,16 @@ pub const PacketPacker = struct {
             }
 
             // Payload length placeholder - use 2-byte varint (can hold up to 16383)
-            length_offset = fbs.pos;
+            length_offset = fbs.seek;
             try writer.writeInt(u16, 0, .big); // placeholder
         }
 
         // Write packet number
-        const pn_offset = fbs.pos;
+        const pn_offset = fbs.seek;
         try writer.writeAll(pn_buf[0..pn_len]);
 
         // Record where the plaintext payload starts
-        const payload_start = fbs.pos;
+        const payload_start = fbs.seek;
 
         // Collect frames
         var ack_eliciting = false;
@@ -357,7 +357,7 @@ pub const PacketPacker = struct {
                 .application => 3,
             };
             const cs = crypto_mgr.getStream(crypto_level_idx);
-            const remaining_space = effective_max - fbs.pos - AEAD_TAG_LEN - 4;
+            const remaining_space = effective_max - fbs.seek - AEAD_TAG_LEN - 4;
             if (remaining_space > 0) {
                 if (cs.popCryptoFrame(remaining_space)) |crypto_frame| {
                     try crypto_frame.write(writer);
@@ -444,10 +444,10 @@ pub const PacketPacker = struct {
             var sched_buf: [stream_mod.StreamsMap.MAX_SCHEDULABLE]*stream_mod.Stream = undefined;
             const sched_count = streams.getScheduledStreams(&sched_buf);
             for (sched_buf[0..sched_count]) |s| {
-                if (fbs.pos + AEAD_TAG_LEN + 16 >= effective_max) break;
+                if (fbs.seek + AEAD_TAG_LEN + 16 >= effective_max) break;
                 if (conn_budget == 0) break;
                 if (stream_frame_info_count >= ack_handler.MAX_STREAM_FRAMES_PER_PACKET) break;
-                const remaining = effective_max - fbs.pos - AEAD_TAG_LEN;
+                const remaining = effective_max - fbs.seek - AEAD_TAG_LEN;
                 const header_overhead = streamFrameHeaderOverhead(s.send.stream_id, s.send.send_offset, remaining);
                 if (remaining <= header_overhead) break;
                 const max_stream_data = @min(remaining - header_overhead, conn_budget);
@@ -477,10 +477,10 @@ pub const PacketPacker = struct {
             const uni_sched_count = streams.getScheduledUniStreams(&uni_sched_buf);
             if (uni_sched_count > 0) {
             for (uni_sched_buf[0..uni_sched_count]) |s| {
-                if (fbs.pos + AEAD_TAG_LEN + 16 >= effective_max) break;
+                if (fbs.seek + AEAD_TAG_LEN + 16 >= effective_max) break;
                 if (conn_budget == 0) break;
                 if (stream_frame_info_count >= ack_handler.MAX_STREAM_FRAMES_PER_PACKET) break;
-                const remaining_uni = effective_max - fbs.pos - AEAD_TAG_LEN;
+                const remaining_uni = effective_max - fbs.seek - AEAD_TAG_LEN;
                 const uni_header_overhead = streamFrameHeaderOverhead(s.stream_id, s.send_offset, remaining_uni);
                 if (remaining_uni <= uni_header_overhead) break;
                 const max_stream_data = @min(remaining_uni - uni_header_overhead, conn_budget);
@@ -520,7 +520,7 @@ pub const PacketPacker = struct {
                     // DATAGRAM_WITH_LENGTH frame: type(1) + varint(len) + payload
                     const varint_overhead: usize = if (dgram_data.len <= 63) 1 else 2;
                     const frame_size = 1 + varint_overhead + dgram_data.len;
-                    if (fbs.pos + frame_size + AEAD_TAG_LEN > effective_max) break;
+                    if (fbs.seek + frame_size + AEAD_TAG_LEN > effective_max) break;
                     const dgram_frame = Frame{ .datagram_with_length = .{
                         .data = dgram_data,
                     } };
@@ -538,7 +538,7 @@ pub const PacketPacker = struct {
         // creates an ACK amplification loop (ACK+PING → server ACKs → client ACK+PING → ...).
 
         // Check if we have any payload
-        var payload_len = fbs.pos - payload_start;
+        var payload_len = fbs.seek - payload_start;
         if (payload_len == 0) {
             // Roll back the packet number we consumed — no packet will be sent.
             // This applies even with pad_target > 0: sending a padded Initial with
@@ -555,24 +555,24 @@ pub const PacketPacker = struct {
         const min_plaintext: usize = 4;
         if (payload_len < min_plaintext) {
             const min_pad = min_plaintext - payload_len;
-            @memset(tmp[fbs.pos..][0..min_pad], 0x00);
-            fbs.pos += min_pad;
+            @memset(tmp[fbs.seek..][0..min_pad], 0x00);
+            fbs.seek += min_pad;
             payload_len = min_plaintext;
         }
 
         // Pad to target size (RFC 9000 §14.1): Initial, 0-RTT, or Handshake
         // when used to pad a coalesced server datagram to 1200 bytes.
         if (pad_target > 0 and (pkt_type == .initial or pkt_type == .zero_rtt or pkt_type == .handshake)) {
-            const current_total = fbs.pos - header_start + AEAD_TAG_LEN;
+            const current_total = fbs.seek - header_start + AEAD_TAG_LEN;
             if (current_total < pad_target) {
-                const pad_needed = @min(pad_target - current_total, tmp.len - fbs.pos);
-                @memset(tmp[fbs.pos..][0..pad_needed], 0x00);
-                fbs.pos += pad_needed;
+                const pad_needed = @min(pad_target - current_total, tmp.len - fbs.seek);
+                @memset(tmp[fbs.seek..][0..pad_needed], 0x00);
+                fbs.seek += pad_needed;
             }
         }
 
-        // The plaintext payload is tmp[payload_start..fbs.pos]
-        const plaintext_payload = tmp[payload_start..fbs.pos];
+        // The plaintext payload is tmp[payload_start..fbs.seek]
+        const plaintext_payload = tmp[payload_start..fbs.seek];
         const header_bytes = tmp[header_start..payload_start];
 
         // Fill in the payload length field for long headers
@@ -663,10 +663,10 @@ pub const PacketPacker = struct {
         try writer.writeByte(first_byte);
         try writer.writeAll(self.getDcid());
 
-        const pn_offset = fbs.pos;
+        const pn_offset = fbs.seek;
         try writer.writeAll(pn_buf[0..pn_len]);
 
-        const payload_start = fbs.pos;
+        const payload_start = fbs.seek;
 
         // PING frame (makes it ACK-eliciting)
         try packet_mod.writeVarInt(writer, 0x01);
@@ -674,12 +674,12 @@ pub const PacketPacker = struct {
         // Fill remaining space with PADDING to reach target_size
         const overhead = payload_start + AEAD_TAG_LEN;
         if (target_size > overhead) {
-            const pad_needed = target_size - overhead - (fbs.pos - payload_start);
-            @memset(tmp[fbs.pos..][0..pad_needed], 0x00);
-            fbs.pos += pad_needed;
+            const pad_needed = target_size - overhead - (fbs.seek - payload_start);
+            @memset(tmp[fbs.seek..][0..pad_needed], 0x00);
+            fbs.seek += pad_needed;
         }
 
-        const plaintext_payload = tmp[payload_start..fbs.pos];
+        const plaintext_payload = tmp[payload_start..fbs.seek];
         const header_bytes = tmp[0..payload_start];
 
         // Copy header

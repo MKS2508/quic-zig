@@ -76,7 +76,7 @@ test "fuzz: packet header parse" {
 
             // Try parsing with various short DCID lengths (0, 8, 20)
             for ([_]u8{ 0, 8, 20 }) |dcid_len| {
-                fbs.pos = 0;
+                fbs.seek = 0;
                 _ = packet.Header.parse(&fbs, dcid_len) catch continue;
             }
         }
@@ -368,7 +368,7 @@ test "fuzz: capsule round-trip" {
             // Use first bytes as capsule type (varint), rest as value
             var fbs = io_compat.fixedBufferStream(input);
             const capsule_type = packet.readVarInt(fbs.reader()) catch return;
-            const value = input[fbs.pos..];
+            const value = input[fbs.seek..];
 
             // Write capsule
             var buf: [4096]u8 = undefined;
@@ -664,7 +664,7 @@ test "fuzz: coalesced packet headers" {
                 const hdr = packet.Header.parse(&fbs, 8) catch break;
 
                 // Advance past this packet
-                const consumed = fbs.pos;
+                const consumed = fbs.seek;
                 if (consumed == 0) break;
 
                 // Short header (1-RTT) consumes rest of datagram

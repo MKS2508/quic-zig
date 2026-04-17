@@ -43,7 +43,7 @@ pub fn parse(data: []const u8) !struct { capsule: Capsule, consumed: usize } {
     // Capsule Length (varint)
     const length = packet.readVarInt(reader) catch return error.BufferTooShort;
 
-    const header_size = fbs.pos;
+    const header_size = fbs.seek;
     const total_size = header_size + length;
 
     if (data.len < total_size) return error.BufferTooShort;

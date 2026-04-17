@@ -743,13 +743,12 @@ pub fn Server(comptime Handler: type) type {
             var wtc = &(entry.wt_conn orelse return);
 
             // Parse WT quarter_stream_id prefix inline
-            var fbs = io_compat.fixedBufferStream(data);
-            const reader = fbs.reader();
-            const quarter_id = packet.readVarInt(reader) catch return;
+            var reader: std.Io.Reader = .fixed(data);
+            const quarter_id = packet.readVarInt(&reader) catch return;
             const session_id = quarter_id * 4;
 
             if (wtc.getSession(session_id) == null) return;
-            const payload = data[fbs.pos..];
+            const payload = data[reader.seek..];
 
             // Deliver directly to handler — bypasses ring buffer + poll chain entirely.
             const handler_ptr: *Handler = @ptrCast(@alignCast(entry.datagram_handler_ctx orelse return));

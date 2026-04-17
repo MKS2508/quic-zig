@@ -915,10 +915,10 @@ pub const Connection = struct {
         if (!std.mem.eql(u8, header.scid, self.dcid[0..self.dcid_len])) return;
 
         // Read listed versions from the remaining bytes
-        const remaining = fbs.buffer.len - fbs.pos;
+        const remaining = fbs.buffer.len - fbs.seek;
         if (remaining < 4 or remaining % 4 != 0) return;
 
-        const version_data = fbs.buffer[fbs.pos..];
+        const version_data = fbs.buffer[fbs.seek..];
         const version_count = remaining / 4;
 
         // Check if any listed version is one we support (skip reserved versions)
@@ -2071,122 +2071,122 @@ pub const Connection = struct {
                 // Padding - already skipped in caller, just 1 byte
                 return 1;
             },
-            0x01 => return fbs.pos, // ping: just the type byte
+            0x01 => return fbs.seek, // ping: just the type byte
             0x02, 0x03 => {
                 // ACK/ACK_ECN
-                _ = packet.readVarInt(reader) catch return fbs.pos; // largest_ack
-                _ = packet.readVarInt(reader) catch return fbs.pos; // ack_delay
-                const range_count = packet.readVarInt(reader) catch return fbs.pos;
-                _ = packet.readVarInt(reader) catch return fbs.pos; // first_ack_range
+                _ = packet.readVarInt(reader) catch return fbs.seek; // largest_ack
+                _ = packet.readVarInt(reader) catch return fbs.seek; // ack_delay
+                const range_count = packet.readVarInt(reader) catch return fbs.seek;
+                _ = packet.readVarInt(reader) catch return fbs.seek; // first_ack_range
                 var i: u64 = 0;
                 while (i < range_count) : (i += 1) {
-                    _ = packet.readVarInt(reader) catch return fbs.pos;
-                    _ = packet.readVarInt(reader) catch return fbs.pos;
+                    _ = packet.readVarInt(reader) catch return fbs.seek;
+                    _ = packet.readVarInt(reader) catch return fbs.seek;
                 }
                 if (frame_type == 0x03) {
-                    _ = packet.readVarInt(reader) catch return fbs.pos; // ect0
-                    _ = packet.readVarInt(reader) catch return fbs.pos; // ect1
-                    _ = packet.readVarInt(reader) catch return fbs.pos; // ce
+                    _ = packet.readVarInt(reader) catch return fbs.seek; // ect0
+                    _ = packet.readVarInt(reader) catch return fbs.seek; // ect1
+                    _ = packet.readVarInt(reader) catch return fbs.seek; // ce
                 }
-                return fbs.pos;
+                return fbs.seek;
             },
             0x04 => {
                 // reset_stream
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek;
             },
             0x05 => {
                 // stop_sending
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek;
             },
             0x06 => {
                 // crypto
-                _ = packet.readVarInt(reader) catch return fbs.pos; // offset
-                const length = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos + @as(usize, @intCast(length));
+                _ = packet.readVarInt(reader) catch return fbs.seek; // offset
+                const length = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek + @as(usize, @intCast(length));
             },
             0x07 => {
                 // new_token
-                const len = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos + @as(usize, @intCast(len));
+                const len = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek + @as(usize, @intCast(len));
             },
             0x08...0x0f => {
                 // stream
                 const type_byte: u8 = @intCast(frame_type);
-                _ = packet.readVarInt(reader) catch return fbs.pos; // stream_id
+                _ = packet.readVarInt(reader) catch return fbs.seek; // stream_id
                 if ((type_byte & 0x04) != 0) {
-                    _ = packet.readVarInt(reader) catch return fbs.pos; // offset
+                    _ = packet.readVarInt(reader) catch return fbs.seek; // offset
                 }
                 if ((type_byte & 0x02) != 0) {
-                    const data_len = packet.readVarInt(reader) catch return fbs.pos;
-                    return fbs.pos + @as(usize, @intCast(data_len));
+                    const data_len = packet.readVarInt(reader) catch return fbs.seek;
+                    return fbs.seek + @as(usize, @intCast(data_len));
                 } else {
                     // No length field - rest of packet is data
                     return buf.len;
                 }
             },
             0x10 => {
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek;
             },
             0x11 => {
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek;
             },
             0x12, 0x13, 0x14 => {
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek;
             },
             0x15 => {
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek;
             },
             0x16, 0x17 => {
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek;
             },
             0x18 => {
                 // new_connection_id
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                const cid_len = reader.readByte() catch return fbs.pos;
-                fbs.seekBy(cid_len) catch return fbs.pos;
-                fbs.seekBy(16) catch return fbs.pos; // stateless reset token
-                return fbs.pos;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                const cid_len = reader.readByte() catch return fbs.seek;
+                fbs.seekBy(cid_len) catch return fbs.seek;
+                fbs.seekBy(16) catch return fbs.seek; // stateless reset token
+                return fbs.seek;
             },
             0x19 => {
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek;
             },
             0x1a, 0x1b => {
-                fbs.seekBy(8) catch return fbs.pos;
-                return fbs.pos;
+                fbs.seekBy(8) catch return fbs.seek;
+                return fbs.seek;
             },
             0x1c => {
                 // connection_close
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                const len = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos + @as(usize, @intCast(len));
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                const len = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek + @as(usize, @intCast(len));
             },
             0x1d => {
                 // application_close
-                _ = packet.readVarInt(reader) catch return fbs.pos;
-                const len = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos + @as(usize, @intCast(len));
+                _ = packet.readVarInt(reader) catch return fbs.seek;
+                const len = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek + @as(usize, @intCast(len));
             },
-            0x1e => return fbs.pos, // handshake_done
+            0x1e => return fbs.seek, // handshake_done
             0x30 => return buf.len, // datagram without length - rest of packet
             0x31 => {
                 // datagram with length
-                const len = packet.readVarInt(reader) catch return fbs.pos;
-                return fbs.pos + @as(usize, @intCast(len));
+                const len = packet.readVarInt(reader) catch return fbs.seek;
+                return fbs.seek + @as(usize, @intCast(len));
             },
             else => return buf.len, // unknown - consume rest
         }
@@ -3984,14 +3984,14 @@ pub const Connection = struct {
     pub fn handleDatagram(self: *Connection, bytes: []u8, info: RecvInfo) void {
         var fbs = io.fixedBufferStream(bytes);
         var first_packet = true;
-        while (fbs.pos < bytes.len) {
+        while (fbs.seek < bytes.len) {
             // All valid QUIC packets have the fixed bit (0x40) set.
             // If not set, remaining bytes are padding — stop parsing.
-            if (bytes[fbs.pos] & 0x40 == 0) break;
+            if (bytes[fbs.seek] & 0x40 == 0) break;
 
-            const pkt_start = fbs.pos;
+            const pkt_start = fbs.seek;
             var header = packet.Header.parse(&fbs, self.scid_len) catch break;
-            const full_size = fbs.pos - pkt_start + header.remainder_len;
+            const full_size = fbs.seek - pkt_start + header.remainder_len;
 
             // Only count datagram_size for the first packet to avoid
             // double-counting in amplification limit calculations.
@@ -4001,7 +4001,7 @@ pub const Connection = struct {
             self.recv(&header, &fbs, pkt_info) catch break;
 
             const next_pos = pkt_start + full_size;
-            if (fbs.pos < next_pos) fbs.pos = next_pos;
+            if (fbs.seek < next_pos) fbs.seek = next_pos;
         }
     }
 };

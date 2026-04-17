@@ -82,7 +82,7 @@ const MoqClientHandler = struct {
         moq_msg.writeSetup(fbs.writer(), .{
             .implementation = "quic-zig/moq",
         }) catch return;
-        session.writeStream(ctrl, buf[0..fbs.pos]) catch return;
+        session.writeStream(ctrl, buf[0..fbs.seek]) catch return;
         self.setup_sent = true;
         std.debug.print("[MoQ] Sent SETUP on stream {d}\n", .{ctrl});
     }
@@ -174,7 +174,7 @@ const MoqClientHandler = struct {
         });
 
         // Read objects from remainder.
-        const rest = data[fbs.pos..];
+        const rest = data[fbs.seek..];
         var off: usize = 0;
         while (off < rest.len) {
             var obj_fbs = io_compat.fixedBufferStream(rest[off..]);
@@ -182,7 +182,7 @@ const MoqClientHandler = struct {
             const obj_id = moq_wire.readVarInt(obj_reader) catch break;
             const payload_len = moq_wire.readVarInt(obj_reader) catch break;
             const plen: usize = @intCast(payload_len);
-            const hdr_len = obj_fbs.pos;
+            const hdr_len = obj_fbs.seek;
             if (off + hdr_len + plen > rest.len) break;
             const payload = rest[off + hdr_len .. off + hdr_len + plen];
             std.debug.print("[MoQ] Object track=\"{s}\" group={d} obj={d} payload=\"{s}\"\n", .{ track_name, h.group, obj_id, payload });
@@ -211,7 +211,7 @@ const MoqClientHandler = struct {
                 .group_order = .ascending,
                 .filter_type = .latest_object,
             }) catch return;
-            session.writeStream(bidi, buf[0..fbs.pos]) catch return;
+            session.writeStream(bidi, buf[0..fbs.seek]) catch return;
             std.debug.print("[MoQ] Sent SUBSCRIBE on bidi {d} for track \"{s}\"\n", .{ bidi, ts.name });
         }
     }
@@ -246,7 +246,7 @@ const MoqClientHandler = struct {
             .track_alias = 1,
             .publisher_priority = 128,
         }) catch return;
-        session.writeStream(bidi, buf[0..fbs.pos]) catch return;
+        session.writeStream(bidi, buf[0..fbs.seek]) catch return;
         std.debug.print("[MoQ] Sent PUBLISH on bidi stream {d}\n", .{bidi});
     }
 
@@ -278,7 +278,7 @@ const MoqClientHandler = struct {
         moq_wire.writeVarInt(w, payload.len) catch return;
         w.writeAll(payload) catch return;
 
-        session.writeStream(out_id, buf[0..fbs.pos]) catch return;
+        session.writeStream(out_id, buf[0..fbs.seek]) catch return;
         session.closeQuicStream(out_id);
         std.debug.print("[MoQ] Published tick {d}\n", .{self.group_id});
         self.group_id += 1;

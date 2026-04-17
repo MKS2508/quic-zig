@@ -2,6 +2,8 @@
 pub const sys = @import("sys.zig");
 pub const net_compat = @import("net_compat.zig");
 pub const io_compat = @import("io_compat.zig");
+pub const packet = @import("quic/packet.zig");
+pub const frame = @import("quic/frame.zig");
 pub const connection = @import("quic/connection.zig");
 pub const connection_manager = @import("quic/connection_manager.zig");
 pub const crypto = @import("quic/crypto.zig");

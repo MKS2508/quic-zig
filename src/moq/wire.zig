@@ -103,36 +103,37 @@ pub fn writeVarInt(writer: anytype, value: u64) !void {
 }
 
 pub fn readVarInt(reader: anytype) !u64 {
-    const first = reader.readByte() catch return Error.BufferTooShort;
+    @setEvalBranchQuota(10000);
+    const first = reader.takeByte() catch return Error.BufferTooShort;
     const leading: u4 = @intCast(@clz(~first));
     return switch (leading) {
         0 => @as(u64, first),
         1 => blk: {
-            const b = reader.readByte() catch return Error.BufferTooShort;
+            const b = reader.takeByte() catch return Error.BufferTooShort;
             break :blk (@as(u64, first & 0x3F) << 8) | @as(u64, b);
         },
         2 => blk: {
             var buf: [2]u8 = undefined;
-            reader.readNoEof(&buf) catch return Error.BufferTooShort;
+            reader.readSliceAll(&buf) catch return Error.BufferTooShort;
             break :blk (@as(u64, first & 0x1F) << 16) |
                 (@as(u64, buf[0]) << 8) | @as(u64, buf[1]);
         },
         3 => blk: {
             var buf: [3]u8 = undefined;
-            reader.readNoEof(&buf) catch return Error.BufferTooShort;
+            reader.readSliceAll(&buf) catch return Error.BufferTooShort;
             break :blk (@as(u64, first & 0x0F) << 24) |
                 (@as(u64, buf[0]) << 16) |
                 (@as(u64, buf[1]) << 8) | @as(u64, buf[2]);
         },
         4 => blk: {
             var buf: [4]u8 = undefined;
-            reader.readNoEof(&buf) catch return Error.BufferTooShort;
+            reader.readSliceAll(&buf) catch return Error.BufferTooShort;
             const lo = std.mem.readInt(u32, &buf, .big);
             break :blk (@as(u64, first & 0x07) << 32) | @as(u64, lo);
         },
         5 => blk: {
             var buf: [5]u8 = undefined;
-            reader.readNoEof(&buf) catch return Error.BufferTooShort;
+            reader.readSliceAll(&buf) catch return Error.BufferTooShort;
             const lo = std.mem.readInt(u32, buf[1..5], .big);
             break :blk (@as(u64, first & 0x03) << 40) |
                 (@as(u64, buf[0]) << 32) | @as(u64, lo);
@@ -140,7 +141,7 @@ pub fn readVarInt(reader: anytype) !u64 {
         6 => Error.InvalidVarInt, // 0xFC / 0xFD — 7-byte encoding is excluded.
         7 => blk: {
             var buf: [7]u8 = undefined;
-            reader.readNoEof(&buf) catch return Error.BufferTooShort;
+            reader.readSliceAll(&buf) catch return Error.BufferTooShort;
             break :blk (@as(u64, buf[0]) << 48) |
                 (@as(u64, buf[1]) << 40) |
                 (@as(u64, buf[2]) << 32) |
@@ -148,7 +149,7 @@ pub fn readVarInt(reader: anytype) !u64 {
         },
         8 => blk: {
             var buf: [8]u8 = undefined;
-            reader.readNoEof(&buf) catch return Error.BufferTooShort;
+            reader.readSliceAll(&buf) catch return Error.BufferTooShort;
             break :blk std.mem.readInt(u64, &buf, .big);
         },
         else => unreachable,
@@ -167,7 +168,7 @@ pub fn readVarBytesInto(reader: anytype, buf: []u8) ![]u8 {
     const len = try readVarInt(reader);
     if (len > buf.len) return Error.ValueTooLong;
     const dst = buf[0..@as(usize, @intCast(len))];
-    reader.readNoEof(dst) catch return Error.BufferTooShort;
+    reader.readSliceAll(dst) catch return Error.BufferTooShort;
     return dst;
 }
 
@@ -175,9 +176,9 @@ pub fn readVarBytesInto(reader: anytype, buf: []u8) ![]u8 {
 pub fn readVarBytesZc(fbs: *io.FixedBufferStream([]const u8)) ![]const u8 {
     const len_u64 = try readVarInt(fbs.reader());
     const len = @as(usize, @intCast(len_u64));
-    if (fbs.pos + len > fbs.buffer.len) return Error.BufferTooShort;
-    const slice = fbs.buffer[fbs.pos .. fbs.pos + len];
-    fbs.pos += len;
+    if (fbs.seek + len > fbs.buffer.len) return Error.BufferTooShort;
+    const slice = fbs.buffer[fbs.seek .. fbs.seek + len];
+    fbs.seek += len;
     return slice;
 }
 
@@ -232,7 +233,7 @@ pub const KvIterator = struct {
     }
 
     pub fn next(self: *KvIterator) !?KvEntry {
-        if (self.fbs.pos >= self.fbs.buffer.len) return null;
+        if (self.fbs.seek >= self.fbs.buffer.len) return null;
         const delta = try readVarInt(self.fbs.reader());
         const key = if (self.first) delta else blk: {
             const sum = std.math.add(u64, self.prev, delta) catch
@@ -294,9 +295,9 @@ test "varint round-trip at each length boundary" {
         var buf: [16]u8 = undefined;
         var fbs = io.fixedBufferStream(&buf);
         try writeVarInt(fbs.writer(), v);
-        const written = fbs.pos;
+        const written = fbs.seek;
         try testing.expectEqual(varIntLength(v), written);
-        fbs.pos = 0;
+        fbs.seek = 0;
         const got = try readVarInt(fbs.reader());
         try testing.expectEqual(v, got);
     }
@@ -330,7 +331,7 @@ test "varbytes round-trip" {
     try writeVarBytes(fbs.writer(), "hello");
     try writeVarBytes(fbs.writer(), "");
     try writeVarBytes(fbs.writer(), "world!");
-    const written = fbs.pos;
+    const written = fbs.seek;
 
     var rb = io.fixedBufferStream(@as([]const u8, buf[0..written]));
     const a = try readVarBytesZc(&rb);
@@ -346,7 +347,7 @@ test "tuple round-trip" {
     var fbs = io.fixedBufferStream(&buf);
     const parts = [_][]const u8{ "moq", "demo", "camera" };
     try writeTuple(fbs.writer(), &parts);
-    const written = fbs.pos;
+    const written = fbs.seek;
 
     var rb = io.fixedBufferStream(@as([]const u8, buf[0..written]));
     const count = try readVarInt(rb.reader());
@@ -368,7 +369,7 @@ test "kv list round-trip with delta encoding" {
         .{ .key = 7, .value = .{ .bytes = "impl-x" } },
     };
     try encodeKvList(fbs.writer(), &entries);
-    const written = fbs.pos;
+    const written = fbs.seek;
 
     // First delta must be 2, then 1, then 4 — verify on the wire.
     try testing.expectEqual(@as(u8, 0x02), buf[0]);

@@ -230,7 +230,7 @@ const RelayHandler = struct {
             moq_msg.writeSetup(fbs.writer(), .{
                 .implementation = "quic-zig/moq-relay",
             }) catch return;
-            ctrl.writeData(setup_buf[0..fbs.pos]) catch return;
+            ctrl.writeData(setup_buf[0..fbs.seek]) catch return;
             self.clients[ci].setup_done = true;
             std.debug.print("[relay] Sent SETUP to client {d}\n", .{ci});
             self.clients[ci].freeSlot(stream_id);
@@ -285,7 +285,7 @@ const RelayHandler = struct {
         var buf: [64]u8 = undefined;
         var ok_fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writeRequestOk(ok_fbs.writer(), .{}) catch return;
-        stream.send.writeData(buf[0..ok_fbs.pos]) catch return;
+        stream.send.writeData(buf[0..ok_fbs.seek]) catch return;
 
         // Push NAMESPACE for each currently-known track whose namespace
         // starts with this prefix.
@@ -319,7 +319,7 @@ const RelayHandler = struct {
         var buf: [512]u8 = undefined;
         var ns_fbs = io_compat.fixedBufferStream(&buf);
         try moq_msg.writeNamespace(ns_fbs.writer(), .{ .track_namespace = parts_buf[0..n_parts] });
-        try stream.send.writeData(buf[0..ns_fbs.pos]);
+        try stream.send.writeData(buf[0..ns_fbs.seek]);
     }
 
     fn handlePublishNamespace(self: *RelayHandler, ci: usize, stream_id: u64, payload: []const u8) void {
@@ -332,7 +332,7 @@ const RelayHandler = struct {
         var buf: [64]u8 = undefined;
         var ok_fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writeRequestOk(ok_fbs.writer(), .{}) catch return;
-        stream.send.writeData(buf[0..ok_fbs.pos]) catch return;
+        stream.send.writeData(buf[0..ok_fbs.seek]) catch return;
         std.debug.print("[relay] sent REQUEST_OK for publish_namespace\n", .{});
     }
 
@@ -376,7 +376,7 @@ const RelayHandler = struct {
             var buf: [256]u8 = undefined;
             var fbs = io_compat.fixedBufferStream(&buf);
             moq_msg.writeSubscribeOk(fbs.writer(), .{ .track_alias = alias }) catch return;
-            stream.send.writeData(buf[0..fbs.pos]) catch return;
+            stream.send.writeData(buf[0..fbs.seek]) catch return;
 
             std.debug.print("[relay] SUBSCRIBE_OK to client {d} alias={d} (track {d}, {d} subs)\n", .{
                 ci, alias, ti, t.sub_count,
@@ -417,7 +417,7 @@ const RelayHandler = struct {
         moq_wire.writeVarInt(w, payload.len) catch return;
         w.writeAll(payload) catch return;
 
-        out.writeData(buf[0..fbs.pos]) catch return;
+        out.writeData(buf[0..fbs.seek]) catch return;
         out.close();
         std.debug.print("[relay] Sent object to client {d} (track {d}, group {d})\n", .{ sub_ci, ti, self.group_id });
     }
@@ -454,7 +454,7 @@ const RelayHandler = struct {
         var buf: [256]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writePublishOk(fbs.writer(), .{}) catch return;
-        stream.send.writeData(buf[0..fbs.pos]) catch return;
+        stream.send.writeData(buf[0..fbs.seek]) catch return;
 
         std.debug.print("[relay] PUBLISH_OK to client {d} (track {d})\n", .{ ci, ti });
     }
@@ -503,9 +503,9 @@ const RelayHandler = struct {
             }) catch continue;
 
             // Copy the object data (everything after the subgroup header).
-            w.writeAll(data[fbs.pos..]) catch continue;
+            w.writeAll(data[fbs.seek..]) catch continue;
 
-            out.writeData(out_buf[0..out_fbs.pos]) catch continue;
+            out.writeData(out_buf[0..out_fbs.seek]) catch continue;
             out.close();
         }
     }
@@ -535,7 +535,7 @@ const RelayHandler = struct {
                     .status_code = 1, // producer disconnected
                     .reason = "publisher disconnected",
                 }) catch continue;
-                const done_bytes = buf[0..fbs.pos];
+                const done_bytes = buf[0..fbs.seek];
 
                 for (0..t.sub_count) |si| {
                     const sub_ci = t.sub_client_idx[si];
@@ -590,7 +590,7 @@ const RelayHandler = struct {
         moq_wire.writeVarInt(w, payload.len) catch return;
         w.writeAll(payload) catch return;
 
-        out.writeData(buf[0..fbs.pos]) catch return;
+        out.writeData(buf[0..fbs.seek]) catch return;
         out.close();
     }
 

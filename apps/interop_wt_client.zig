@@ -385,7 +385,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 fbs.writer().writeAll(p) catch {};
                 fbs.writer().writeByte('"') catch {};
             }
-            proto_header_len = fbs.pos;
+            proto_header_len = fbs.seek;
         }
 
         const session_id = blk: {

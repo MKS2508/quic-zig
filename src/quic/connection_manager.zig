@@ -296,19 +296,18 @@ pub const ConnectionManager = struct {
         var fbs = io.fixedBufferStream(bytes);
         var current_entry: ?*ConnEntry = null;
 
-        while (fbs.pos < bytes.len) {
+        while (fbs.seek < bytes.len) {
             // All valid QUIC packets have the fixed bit (0x40) set.
-            if (bytes[fbs.pos] & 0x40 == 0) break;
+            if (bytes[fbs.seek] & 0x40 == 0) break;
 
-            const pkt_start = fbs.pos;
+            const pkt_start = fbs.seek;
             var header = packet.Header.parse(&fbs, self.local_cid_len) catch break;
-            const full_size = fbs.pos - pkt_start + header.remainder_len;
+            const full_size = fbs.seek - pkt_start + header.remainder_len;
 
             // Version negotiation (RFC 9000 §6)
             if (header.version != 0 and !protocol.isSupportedVersion(header.version)) {
                 var vn_fbs = io.fixedBufferStream(out_buf);
-                const vn_writer = vn_fbs.writer();
-                packet.negotiateVersion(header, &vn_writer) catch return .{ .dropped = {} };
+                packet.negotiateVersion(header, &vn_fbs) catch return .{ .dropped = {} };
                 return .{ .send_response = vn_fbs.getWritten() };
             }
 
@@ -387,7 +386,7 @@ pub const ConnectionManager = struct {
             self.syncCids(e);
 
             const next_pos = pkt_start + full_size;
-            if (fbs.pos < next_pos) fbs.pos = next_pos;
+            if (fbs.seek < next_pos) fbs.seek = next_pos;
         }
 
         if (current_entry) |e| {

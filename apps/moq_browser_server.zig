@@ -233,7 +233,7 @@ const RelayHandler = struct {
         var buf: [256]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writeSetup(fbs.writer(), .{ .implementation = "quic-zig/moq-wt-relay" }) catch return;
-        session.sendStreamData(ctrl, buf[0..fbs.pos]) catch return;
+        session.sendStreamData(ctrl, buf[0..fbs.seek]) catch return;
         self.clients[ci].setup_sent = true;
         std.debug.print("[relay] client {d} connected (WT session {d})\n", .{ ci, session_id });
     }
@@ -352,7 +352,7 @@ const RelayHandler = struct {
             var buf: [256]u8 = undefined;
             var fbs = io_compat.fixedBufferStream(&buf);
             moq_msg.writeSubscribeOk(fbs.writer(), .{ .track_alias = alias }) catch return;
-            session.sendStreamData(stream_id, buf[0..fbs.pos]) catch return;
+            session.sendStreamData(stream_id, buf[0..fbs.seek]) catch return;
             std.debug.print("[relay] SUBSCRIBE_OK → client {d} alias={d} (track {d}, {d} subs, pub={?d})\n", .{
                 ci, alias, ti, t.sub_count, t.publisher_idx,
             });
@@ -388,7 +388,7 @@ const RelayHandler = struct {
                 .end_of_group = cg.end_of_group,
                 .per_object_properties = cg.per_object_properties,
             }) catch continue;
-            sub_wtc.sendStreamData(out, hdr_buf[0..hdr_fbs.pos]) catch continue;
+            sub_wtc.sendStreamData(out, hdr_buf[0..hdr_fbs.seek]) catch continue;
             sub_wtc.sendStreamData(out, cg.payload[0..cg.payload_len]) catch {};
             sub_wtc.closeStream(out);
         }
@@ -422,7 +422,7 @@ const RelayHandler = struct {
         var buf: [256]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writePublishOk(fbs.writer(), .{}) catch return;
-        session.sendStreamData(stream_id, buf[0..fbs.pos]) catch return;
+        session.sendStreamData(stream_id, buf[0..fbs.seek]) catch return;
         std.debug.print("[relay] PUBLISH_OK → client {d} (track {d}, {d} subs)\n", .{ ci, ti, t.sub_count });
     }
 
@@ -482,7 +482,7 @@ const RelayHandler = struct {
                     .end_of_group = h.end_of_group,
                     .per_object_properties = h.per_object_properties,
                 }) catch continue;
-                sub_wtc.sendStreamData(out, hdr_buf[0..hdr_fbs.pos]) catch continue;
+                sub_wtc.sendStreamData(out, hdr_buf[0..hdr_fbs.seek]) catch continue;
 
                 fs.out_stream_ids[fs.out_count] = out;
                 fs.out_sub_idx[fs.out_count] = sub_ci;
@@ -491,7 +491,7 @@ const RelayHandler = struct {
             std.debug.print("[relay] stream from client {d} → {d} subs (group={d})\n", .{ ci, fs.out_count, h.group });
 
             fs.header_parsed = true;
-            fs.forwarded_pos = fbs.pos;
+            fs.forwarded_pos = fbs.seek;
         }
 
         // Forward any newly arrived bytes AND append them to the live cache.

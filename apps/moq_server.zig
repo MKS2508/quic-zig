@@ -86,7 +86,7 @@ const MoqServerHandler = struct {
                 moq_msg.writeSetup(fbs.writer(), .{
                     .implementation = "quic-zig/moq-server",
                 }) catch return;
-                send_stream.writeData(buf[0..fbs.pos]) catch return;
+                send_stream.writeData(buf[0..fbs.seek]) catch return;
                 self.setup_sent = true;
                 std.debug.print("[MoQ] Sent SETUP on stream {d}\n", .{send_stream.stream_id});
             }
@@ -125,7 +125,7 @@ const MoqServerHandler = struct {
         moq_msg.writeSubscribeOk(fbs.writer(), .{
             .track_alias = alias,
         }) catch return;
-        stream.send.writeData(buf[0..fbs.pos]) catch return;
+        stream.send.writeData(buf[0..fbs.seek]) catch return;
 
         if (self.subscriber_count < MAX_SUBSCRIBERS) {
             self.subscribers[self.subscriber_count] = .{ .active = true, .track_alias = alias };
@@ -166,7 +166,7 @@ const MoqServerHandler = struct {
             moq_wire.writeVarInt(w, payload.len) catch continue;
             w.writeAll(payload) catch continue;
 
-            data_stream.writeData(buf[0..fbs.pos]) catch |e| {
+            data_stream.writeData(buf[0..fbs.seek]) catch |e| {
                 std.debug.print("[MoQ] writeData failed: {}\n", .{e});
                 continue;
             };

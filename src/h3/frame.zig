@@ -154,7 +154,7 @@ pub fn parse(data: []const u8) !struct { frame: H3Frame, consumed: usize } {
     // Length (varint)
     const length = packet.readVarInt(reader) catch return error.BufferTooShort;
 
-    const header_size = fbs.pos;
+    const header_size = fbs.seek;
     const total_size = header_size + length;
 
     if (data.len < total_size) return error.BufferTooShort;
@@ -180,7 +180,7 @@ pub fn parse(data: []const u8) !struct { frame: H3Frame, consumed: usize } {
             var sfbs = io.fixedBufferStream(payload);
             const sreader = sfbs.reader();
 
-            while (sfbs.pos < payload.len) {
+            while (sfbs.seek < payload.len) {
                 const id_raw = packet.readVarInt(sreader) catch break;
                 const value = packet.readVarInt(sreader) catch return error.MalformedSettings;
 
@@ -233,7 +233,7 @@ pub fn parse(data: []const u8) !struct { frame: H3Frame, consumed: usize } {
             var pfbs = io.fixedBufferStream(payload);
             const preader = pfbs.reader();
             const prioritized_id = packet.readVarInt(preader) catch return error.MalformedFrame;
-            const fv_start = pfbs.pos;
+            const fv_start = pfbs.seek;
             break :blk .{ .priority_update = .{
                 .stream_id = prioritized_id,
                 .field_value = payload[fv_start..],
@@ -323,7 +323,7 @@ pub fn write(frame: H3Frame, writer: anytype) !void {
             var buf: [8]u8 = undefined;
             var gfbs = io.fixedBufferStream(&buf);
             try packet.writeVarInt(gfbs.writer(), id);
-            const payload_len = gfbs.pos;
+            const payload_len = gfbs.seek;
 
             try packet.writeVarInt(writer, 0x07);
             try packet.writeVarInt(writer, payload_len);
@@ -333,7 +333,7 @@ pub fn write(frame: H3Frame, writer: anytype) !void {
             var buf: [8]u8 = undefined;
             var cfbs = io.fixedBufferStream(&buf);
             try packet.writeVarInt(cfbs.writer(), id);
-            const payload_len = cfbs.pos;
+            const payload_len = cfbs.seek;
 
             try packet.writeVarInt(writer, 0x03);
             try packet.writeVarInt(writer, payload_len);
@@ -343,7 +343,7 @@ pub fn write(frame: H3Frame, writer: anytype) !void {
             var buf: [8]u8 = undefined;
             var mfbs = io.fixedBufferStream(&buf);
             try packet.writeVarInt(mfbs.writer(), id);
-            const payload_len = mfbs.pos;
+            const payload_len = mfbs.seek;
 
             try packet.writeVarInt(writer, 0x0d);
             try packet.writeVarInt(writer, payload_len);
@@ -355,7 +355,7 @@ pub fn write(frame: H3Frame, writer: anytype) !void {
             var id_buf: [8]u8 = undefined;
             var id_fbs = io.fixedBufferStream(&id_buf);
             try packet.writeVarInt(id_fbs.writer(), pu.stream_id);
-            const payload_len = id_fbs.pos + pu.field_value.len;
+            const payload_len = id_fbs.seek + pu.field_value.len;
 
             try packet.writeVarInt(writer, 0xF0700);
             try packet.writeVarInt(writer, payload_len);

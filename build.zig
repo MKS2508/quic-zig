@@ -242,6 +242,14 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args_b| run_bench.addArgs(args_b);
     b.step("run-bench", "Run benchmark client").dependOn(&run_bench.step);
 
+    // Codec microbench — pure CPU (parse/serialize loops), no sockets.
+    // Used to track perf of the fixedBufferStream shim vs. std.Io native.
+    const exe_bench_codec = App.add(b, "bench-codec", "apps/bench_codec.zig", target, optimize, need_libc, lib_mod);
+    b.installArtifact(exe_bench_codec);
+    const run_bench_codec = b.addRunArtifact(exe_bench_codec);
+    run_bench_codec.step.dependOn(b.getInstallStep());
+    b.step("run-bench-codec", "Run codec microbench").dependOn(&run_bench_codec.step);
+
     // kqueue latency benchmark (raw kqueue vs libxev) — macOS/BSD only
     if (target.result.os.tag == .macos or target.result.os.tag == .freebsd) {
         const exe_bench_kq = b.addExecutable(.{

@@ -10,6 +10,9 @@ const h3_frame = @import("frame.zig");
 const qpack = @import("qpack.zig");
 const priority = @import("priority.zig");
 
+/// Re-export the frame module so library consumers can reach `quic.h3.frame`.
+pub const frame = h3_frame;
+
 pub const ALPN = [_][]const u8{ "h3", "h3-32", "h3-31", "h3-30", "h3-29" };
 
 /// HTTP/3 error codes (RFC 9114 Section 8.1).
@@ -636,8 +639,8 @@ pub const H3Connection = struct {
                 .control => {
                     self.peer_control_stream_id = stream_id;
                     // If there's remaining data, buffer it for SETTINGS parsing
-                    if (fbs.pos < data.len) {
-                        const remaining = data[fbs.pos..];
+                    if (fbs.seek < data.len) {
+                        const remaining = data[fbs.seek..];
                         var buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
                         try buf.appendSlice(self.allocator, remaining);
                         try self.stream_bufs.put(stream_id, buf);
@@ -646,8 +649,8 @@ pub const H3Connection = struct {
                 .qpack_encoder => {
                     self.peer_qpack_enc_stream_id = stream_id;
                     // Buffer remaining data (encoder instructions after type byte)
-                    if (fbs.pos < data.len) {
-                        const remaining = data[fbs.pos..];
+                    if (fbs.seek < data.len) {
+                        const remaining = data[fbs.seek..];
                         self.qpack_decoder.processEncoderInstruction(remaining) catch {
                             self.closeWithError(.general_protocol_error, "QPACK encoder stream error");
                             return error.H3GeneralProtocolError;
@@ -657,8 +660,8 @@ pub const H3Connection = struct {
                 .qpack_decoder => {
                     self.peer_qpack_dec_stream_id = stream_id;
                     // Buffer remaining data (decoder instructions after type byte)
-                    if (fbs.pos < data.len) {
-                        const remaining = data[fbs.pos..];
+                    if (fbs.seek < data.len) {
+                        const remaining = data[fbs.seek..];
                         self.qpack_encoder.processDecoderInstruction(remaining) catch {
                             self.closeWithError(.general_protocol_error, "QPACK decoder stream error");
                             return error.H3GeneralProtocolError;
@@ -1479,10 +1482,10 @@ test "H3 frame error: malformed SETTINGS detected" {
     packet.writeVarInt(writer, 0x04) catch unreachable;
     packet.writeVarInt(writer, 3) catch unreachable;
     // Write a setting ID that's valid but value is incomplete (starts with 0xC0 = 8-byte varint prefix)
-    buf[fbs.pos] = 0x01; // QPACK_MAX_TABLE_CAPACITY
-    buf[fbs.pos + 1] = 0xC0; // 8-byte varint prefix but only 2 bytes follow
-    buf[fbs.pos + 2] = 0x00;
-    const result = h3_frame.parse(buf[0 .. fbs.pos + 3]);
+    buf[fbs.seek] = 0x01; // QPACK_MAX_TABLE_CAPACITY
+    buf[fbs.seek + 1] = 0xC0; // 8-byte varint prefix but only 2 bytes follow
+    buf[fbs.seek + 2] = 0x00;
+    const result = h3_frame.parse(buf[0 .. fbs.seek + 3]);
     try testing.expectError(error.MalformedSettings, result);
 }
 
@@ -1493,7 +1496,7 @@ test "H3 frame error: reserved HTTP/2 frame type" {
     const writer = fbs.writer();
     packet.writeVarInt(writer, 0x02) catch unreachable; // HTTP/2 PRIORITY type
     packet.writeVarInt(writer, 0) catch unreachable; // length 0
-    const result = h3_frame.parse(buf[0..fbs.pos]);
+    const result = h3_frame.parse(buf[0..fbs.seek]);
     try testing.expectError(error.H3FrameUnexpected, result);
 }
 
@@ -1504,8 +1507,8 @@ test "H3 frame error: malformed GOAWAY varint" {
     const writer = fbs.writer();
     packet.writeVarInt(writer, 0x07) catch unreachable; // GOAWAY type
     packet.writeVarInt(writer, 1) catch unreachable; // length 1
-    buf[fbs.pos] = 0xC0; // 8-byte varint prefix but only 1 byte available
-    const result = h3_frame.parse(buf[0 .. fbs.pos + 1]);
+    buf[fbs.seek] = 0xC0; // 8-byte varint prefix but only 1 byte available
+    const result = h3_frame.parse(buf[0 .. fbs.seek + 1]);
     try testing.expectError(error.MalformedGoaway, result);
 }
 
@@ -1575,7 +1578,7 @@ fn injectBidiStreamData(quic_conn: *quic_connection.Connection, stream_id: u64, 
 fn buildSettingsFrame(buf: []u8) usize {
     var fbs = io.fixedBufferStream(buf);
     h3_frame.write(.{ .settings = .{} }, fbs.writer()) catch unreachable;
-    return fbs.pos;
+    return fbs.seek;
 }
 
 // Build a control stream type byte + SETTINGS frame
@@ -1585,7 +1588,7 @@ fn buildControlStreamPayload(buf: []u8) usize {
     h3_frame.writeUniStreamType(fbs.writer(), .control) catch unreachable;
     // Empty SETTINGS frame
     h3_frame.write(.{ .settings = .{} }, fbs.writer()) catch unreachable;
-    return fbs.pos;
+    return fbs.seek;
 }
 
 // Inject a peer control stream with SETTINGS, poll once to consume the settings event.
@@ -1622,14 +1625,14 @@ fn buildGetRequestFrame(buf: []u8) usize {
 
     var fbs = io.fixedBufferStream(buf);
     h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer()) catch unreachable;
-    return fbs.pos;
+    return fbs.seek;
 }
 
 // Build a DATA frame with given payload
 fn buildDataFrame(buf: []u8, payload: []const u8) usize {
     var fbs = io.fixedBufferStream(buf);
     h3_frame.write(.{ .data = payload }, fbs.writer()) catch unreachable;
-    return fbs.pos;
+    return fbs.seek;
 }
 
 // ---- Group A: initConnection tests ----

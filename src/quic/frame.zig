@@ -206,7 +206,7 @@ pub const Frame = union(FrameType) {
                 .padding = blk: {
                     var len: usize = 1;
 
-                    while (stream.pos < bytes.len) {
+                    while (stream.seek < bytes.len) {
                         if (try reader.readByte() != 0x00) {
                             break;
                         }
@@ -308,7 +308,7 @@ pub const Frame = union(FrameType) {
                 return .{
                     .crypto = .{
                         .offset = offset,
-                        .data = bytes[stream.pos..(stream.pos + length)],
+                        .data = bytes[stream.seek..(stream.seek + length)],
                     },
                 };
             },
@@ -317,7 +317,7 @@ pub const Frame = union(FrameType) {
             0x07 => {
                 const len = try packet.readVarInt(reader);
                 return .{
-                    .new_token = bytes[stream.pos..(stream.pos + len)],
+                    .new_token = bytes[stream.seek..(stream.seek + len)],
                 };
             },
 
@@ -333,14 +333,14 @@ pub const Frame = union(FrameType) {
                 const data_length: u64 = if (has_length)
                     try packet.readVarInt(reader)
                 else
-                    bytes.len - stream.pos;
+                    bytes.len - stream.seek;
 
                 break :blk .{ .stream = .{
                     .stream_id = stream_id,
                     .offset = offset,
                     .length = data_length,
                     .fin = has_fin,
-                    .data = bytes[stream.pos..@min(stream.pos + data_length, bytes.len)],
+                    .data = bytes[stream.seek..@min(stream.seek + data_length, bytes.len)],
                 } };
             },
 
@@ -405,7 +405,7 @@ pub const Frame = union(FrameType) {
                                 return error.FrameEncodingError;
                             }
 
-                            const conn_id = bytes[stream.pos..(stream.pos + conn_id_len)];
+                            const conn_id = bytes[stream.seek..(stream.seek + conn_id_len)];
                             try stream.seekBy(conn_id_len);
 
                             break :blk conn_id;
@@ -439,7 +439,7 @@ pub const Frame = union(FrameType) {
                     .frame_type = try packet.readVarInt(reader),
                     .reason = blk: {
                         const len = try packet.readVarInt(reader);
-                        break :blk bytes[stream.pos..(stream.pos + len)];
+                        break :blk bytes[stream.seek..(stream.seek + len)];
                     },
                 },
             },
@@ -450,7 +450,7 @@ pub const Frame = union(FrameType) {
                     .error_code = try packet.readVarInt(reader),
                     .reason = blk: {
                         const len = try packet.readVarInt(reader);
-                        break :blk bytes[stream.pos..(stream.pos + len)];
+                        break :blk bytes[stream.seek..(stream.seek + len)];
                     },
                 },
             },
@@ -463,14 +463,14 @@ pub const Frame = union(FrameType) {
 
             // datagram without length (0x30) — data is rest of packet
             0x30 => .{ .datagram = .{
-                .data = bytes[stream.pos..],
+                .data = bytes[stream.seek..],
             } },
 
             // datagram with length (0x31) — varint length prefix
             0x31 => blk: {
                 const length = try packet.readVarInt(reader);
                 break :blk .{ .datagram_with_length = .{
-                    .data = bytes[stream.pos..@min(stream.pos + length, bytes.len)],
+                    .data = bytes[stream.seek..@min(stream.seek + length, bytes.len)],
                 } };
             },
 

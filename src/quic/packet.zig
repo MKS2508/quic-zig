@@ -303,8 +303,8 @@ pub const PacketNumSpace = struct {
 
 pub fn decrypt(header: *Header, fbs: anytype, space: PacketNumSpace) ![]u8 {
     // We need at least 4 bytes for packet number + 16 for sample
-    if (fbs.pos + 4 + crypto.SAMPLE_LEN > fbs.buffer.len) {
-        std.log.err("Not enough data for packet number + sample: pos={d}, buffer.len={d}", .{ fbs.pos, fbs.buffer.len });
+    if (fbs.seek + 4 + crypto.SAMPLE_LEN > fbs.buffer.len) {
+        std.log.err("Not enough data for packet number + sample: pos={d}, buffer.len={d}", .{ fbs.seek, fbs.buffer.len });
         return error.InvalidPacket;
     }
 
@@ -314,7 +314,7 @@ pub fn decrypt(header: *Header, fbs: anytype, space: PacketNumSpace) ![]u8 {
     var aead = space.crypto_open.?;
 
     // RFC 9001 Section 5.4.2: Sample is taken 4 bytes after START of packet number field
-    const sample_offset = fbs.pos + 4;
+    const sample_offset = fbs.seek + 4;
     if (sample_offset + crypto.SAMPLE_LEN > fbs.buffer.len) {
         std.log.err("Not enough data for sample: offset={d}, buffer.len={d}", .{ sample_offset, fbs.buffer.len });
         return error.InvalidPacket;
@@ -350,11 +350,11 @@ pub fn decrypt(header: *Header, fbs: anytype, space: PacketNumSpace) ![]u8 {
     // Remove header protection from packet number bytes
     var i: usize = 0;
     while (i < header.packet_number_len) : (i += 1) {
-        fbs.buffer[fbs.pos + i] ^= mask[1 + i];
+        fbs.buffer[fbs.seek + i] ^= mask[1 + i];
     }
 
     // Now extract the decrypted packet number
-    const pn_ciphertext: *const [MAX_PACKET_NUMBER_LEN]u8 = fbs.buffer[fbs.pos..][0..MAX_PACKET_NUMBER_LEN];
+    const pn_ciphertext: *const [MAX_PACKET_NUMBER_LEN]u8 = fbs.buffer[fbs.seek..][0..MAX_PACKET_NUMBER_LEN];
 
     // read truncated/raw packet number
     const truncated_packet_number: u64 = try switch (header.packet_number_len) {
@@ -373,14 +373,14 @@ pub fn decrypt(header: *Header, fbs: anytype, space: PacketNumSpace) ![]u8 {
     // RFC 9001 Section 5.2: AD includes the unprotected first byte and everything up to and including packet number
     // For coalesced packets, use packet_start to get the correct offset within the buffer
     const pkt_start = header.packet_start;
-    const header_len = fbs.pos - pkt_start; // total header length including packet number
+    const header_len = fbs.seek - pkt_start; // total header length including packet number
     var header_bytes_buf: [512]u8 = undefined;
     // Copy first byte as unprotected
     header_bytes_buf[0] = first_byte;
     // Copy the rest of the header and packet number (from byte after first to current position)
-    @memcpy(header_bytes_buf[1..][0..(header_len - 1)], fbs.buffer[(pkt_start + 1)..fbs.pos]);
+    @memcpy(header_bytes_buf[1..][0..(header_len - 1)], fbs.buffer[(pkt_start + 1)..fbs.seek]);
     const header_bytes = header_bytes_buf[0..header_len];
-    const encrypted_payload = fbs.buffer[(fbs.pos)..(fbs.pos + payload_len)];
+    const encrypted_payload = fbs.buffer[(fbs.seek)..(fbs.seek + payload_len)];
 
     // Decode packet number
     header.packet_number = decodePacketNumber(space.next_packet_number, truncated_packet_number, header.packet_number_len * 8);
@@ -401,14 +401,14 @@ pub fn decrypt(header: *Header, fbs: anytype, space: PacketNumSpace) ![]u8 {
 /// Uses the (unchanging) HP key for header unprotection, then selects the
 /// appropriate AEAD keys based on the key phase bit (RFC 9001 Section 6).
 pub fn decryptWithKeyUpdate(header: *Header, fbs: anytype, space: *PacketNumSpace, ku: *crypto.KeyUpdateManager) ![]u8 {
-    if (fbs.pos + 4 + crypto.SAMPLE_LEN > fbs.buffer.len) {
+    if (fbs.seek + 4 + crypto.SAMPLE_LEN > fbs.buffer.len) {
         return error.InvalidPacket;
     }
 
     var first_byte = fbs.buffer[header.packet_start];
 
     // Use the HP open key (never changes across key updates)
-    const sample_offset = fbs.pos + 4;
+    const sample_offset = fbs.seek + 4;
     if (sample_offset + crypto.SAMPLE_LEN > fbs.buffer.len) {
         return error.InvalidPacket;
     }
@@ -443,11 +443,11 @@ pub fn decryptWithKeyUpdate(header: *Header, fbs: anytype, space: *PacketNumSpac
     // Unmask packet number bytes
     var i: usize = 0;
     while (i < header.packet_number_len) : (i += 1) {
-        fbs.buffer[fbs.pos + i] ^= mask[1 + i];
+        fbs.buffer[fbs.seek + i] ^= mask[1 + i];
     }
 
     // Extract truncated packet number
-    const pn_ciphertext: *const [MAX_PACKET_NUMBER_LEN]u8 = fbs.buffer[fbs.pos..][0..MAX_PACKET_NUMBER_LEN];
+    const pn_ciphertext: *const [MAX_PACKET_NUMBER_LEN]u8 = fbs.buffer[fbs.seek..][0..MAX_PACKET_NUMBER_LEN];
     const truncated_packet_number: u64 = try switch (header.packet_number_len) {
         1 => @as(u64, std.mem.readInt(u8, pn_ciphertext.*[0..util.sizeOf(u8)], ENDIAN)),
         2 => @as(u64, std.mem.readInt(u16, pn_ciphertext.*[0..util.sizeOf(u16)], ENDIAN)),
@@ -462,12 +462,12 @@ pub fn decryptWithKeyUpdate(header: *Header, fbs: anytype, space: *PacketNumSpac
 
     // Build associated data
     const pkt_start = header.packet_start;
-    const header_len = fbs.pos - pkt_start;
+    const header_len = fbs.seek - pkt_start;
     var header_bytes_buf: [512]u8 = undefined;
     header_bytes_buf[0] = first_byte;
-    @memcpy(header_bytes_buf[1..][0..(header_len - 1)], fbs.buffer[(pkt_start + 1)..fbs.pos]);
+    @memcpy(header_bytes_buf[1..][0..(header_len - 1)], fbs.buffer[(pkt_start + 1)..fbs.seek]);
     const header_bytes = header_bytes_buf[0..header_len];
-    const encrypted_payload = fbs.buffer[(fbs.pos)..(fbs.pos + payload_len)];
+    const encrypted_payload = fbs.buffer[(fbs.seek)..(fbs.seek + payload_len)];
 
     // Decode packet number
     header.packet_number = decodePacketNumber(space.next_packet_number, truncated_packet_number, header.packet_number_len * 8);
@@ -492,9 +492,8 @@ pub fn isLongHeader(first_byte: u8) bool {
 }
 
 pub fn parseQuicHeader(fbs: anytype, short_dcid_len: u8) !Header {
-    const packet_start_pos = fbs.pos;
-    const reader = fbs.reader();
-    const first_byte = try reader.readByte();
+    const packet_start_pos = fbs.seek;
+    const first_byte = try fbs.takeByte();
 
     var header = Header{};
     header.packet_start = packet_start_pos;
@@ -502,32 +501,32 @@ pub fn parseQuicHeader(fbs: anytype, short_dcid_len: u8) !Header {
     if (isLongHeader(first_byte)) {
         // Long header packet
 
-        const version = try reader.readInt(u32, ENDIAN);
+        const version = try fbs.takeInt(u32, ENDIAN);
         header.version = version;
 
-        const dcid_length = try reader.readByte();
+        const dcid_length = try fbs.takeByte();
         if (dcid_length > CONNECTION_ID_MAX_SIZE) {
             std.log.err("Destination CID is too long ({any} bytes)", .{dcid_length});
             return error.PacketError;
         }
-        if (fbs.pos + dcid_length > fbs.buffer.len) return error.BufferTooShort;
+        if (fbs.seek + dcid_length > fbs.buffer.len) return error.BufferTooShort;
 
-        header.dcid = fbs.buffer[fbs.pos..(fbs.pos + dcid_length)];
+        header.dcid = fbs.buffer[fbs.seek..(fbs.seek + dcid_length)];
 
         // advance length
-        try fbs.seekBy(dcid_length);
+        fbs.seek += dcid_length;
 
-        const scid_length = try reader.readByte();
+        const scid_length = try fbs.takeByte();
         if (scid_length > CONNECTION_ID_MAX_SIZE) {
             std.log.err("Source CID is too long ({any} bytes)", .{scid_length});
             return error.InvalidPacket;
         }
-        if (fbs.pos + scid_length > fbs.buffer.len) return error.BufferTooShort;
+        if (fbs.seek + scid_length > fbs.buffer.len) return error.BufferTooShort;
 
-        header.scid = fbs.buffer[fbs.pos..(fbs.pos + scid_length)];
+        header.scid = fbs.buffer[fbs.seek..(fbs.seek + scid_length)];
 
         // advance scid_length
-        try fbs.seekBy(scid_length);
+        fbs.seek += scid_length;
 
         if ((first_byte & FIXED_BIT) == 0) {
             std.log.err("Packet fixed bit is zero", .{});
@@ -547,20 +546,21 @@ pub fn parseQuicHeader(fbs: anytype, short_dcid_len: u8) !Header {
                 // with at least 1200 bytes payload. This is validated when sending (in packet_packer),
                 // not when receiving, since the server may send smaller Initial packets.
 
-                const token_length = try readVarInt(reader);
+                const token_length = try readVarInt(fbs);
                 if (token_length > 0) {
-                    header.token = fbs.buffer[fbs.pos..(fbs.pos + token_length)];
-                    try fbs.seekBy(@intCast(token_length));
+                    if (fbs.seek + token_length > fbs.buffer.len) return error.BufferTooShort;
+                    header.token = fbs.buffer[fbs.seek..(fbs.seek + token_length)];
+                    fbs.seek += @intCast(token_length);
                 }
 
-                header.remainder_len = try readVarInt(reader);
+                header.remainder_len = try readVarInt(fbs);
             },
 
             PacketType.retry => {
                 // Retry packet: everything after header, before 16-byte integrity tag, is the token
-                const remaining = fbs.buffer.len - fbs.pos;
+                const remaining = fbs.buffer.len - fbs.seek;
                 if (remaining > RETRY_INTEGRITY_TAG_SIZE) {
-                    header.token = fbs.buffer[fbs.pos .. fbs.buffer.len - RETRY_INTEGRITY_TAG_SIZE];
+                    header.token = fbs.buffer[fbs.seek .. fbs.buffer.len - RETRY_INTEGRITY_TAG_SIZE];
                 }
                 // Retry packets have no Length field — they consume the entire datagram
                 header.remainder_len = remaining;
@@ -570,22 +570,22 @@ pub fn parseQuicHeader(fbs: anytype, short_dcid_len: u8) !Header {
 
             PacketType.handshake, PacketType.zero_rtt => {
                 // Long header packets (like Initial but without Token field)
-                header.remainder_len = try readVarInt(reader);
+                header.remainder_len = try readVarInt(fbs);
             },
 
             PacketType.one_rtt => {
                 // Short header packet (1-RTT)
-                if (fbs.pos + short_dcid_len <= fbs.buffer.len) {
-                    header.dcid = fbs.buffer[fbs.pos..(fbs.pos + short_dcid_len)];
-                    try fbs.seekBy(short_dcid_len);
+                if (fbs.seek + short_dcid_len <= fbs.buffer.len) {
+                    header.dcid = fbs.buffer[fbs.seek..(fbs.seek + short_dcid_len)];
+                    fbs.seek += short_dcid_len;
                 }
 
-                header.remainder_len = fbs.buffer.len - fbs.pos;
+                header.remainder_len = fbs.buffer.len - fbs.seek;
             },
 
             else => {
                 std.log.err("Packet type not recognized: {any}", .{header.packet_type});
-                header.remainder_len = try readVarInt(reader);
+                header.remainder_len = try readVarInt(fbs);
             },
         }
     } else {
@@ -594,12 +594,12 @@ pub fn parseQuicHeader(fbs: anytype, short_dcid_len: u8) !Header {
         header.packet_type = PacketType.one_rtt;
 
         // Short header: first_byte + DCID (known length from connection state) + payload
-        if (fbs.pos + short_dcid_len <= fbs.buffer.len) {
-            header.dcid = fbs.buffer[fbs.pos..(fbs.pos + short_dcid_len)];
-            try fbs.seekBy(short_dcid_len);
+        if (fbs.seek + short_dcid_len <= fbs.buffer.len) {
+            header.dcid = fbs.buffer[fbs.seek..(fbs.seek + short_dcid_len)];
+            fbs.seek += short_dcid_len;
         }
 
-        header.remainder_len = fbs.buffer.len - fbs.pos;
+        header.remainder_len = fbs.buffer.len - fbs.seek;
     }
 
     return header;
@@ -745,7 +745,7 @@ pub fn generateRetryToken(
     // Write first 14 bytes of sockaddr.data (covers IPv4 port+addr)
     try pt_writer.writeAll(addrDataBytes(&client_addr));
 
-    const pt_len = pt_fbs.pos;
+    const pt_len = pt_fbs.seek;
     const pt_data = plaintext[0..pt_len];
 
     // Encrypt: no AD, just nonce+key
@@ -923,7 +923,7 @@ pub fn readVarInt(reader: anytype) !u64 {
     //     sequence 7b bd decodes to 15293; and the single octet 25 decodes to
     //     37 (as does the two octet sequence 40 25).
     //
-    const first_byte = try reader.readByte();
+    const first_byte = try reader.takeByte();
 
     // the first two bits of the first byte encode the length
     var len: i32 = @as(i32, 1) << @intCast((first_byte & 0xc0) >> 6);
@@ -934,7 +934,7 @@ pub fn readVarInt(reader: anytype) !u64 {
         len = len - 1;
         value = (value << 8);
 
-        const red = try reader.readByte();
+        const red = try reader.takeByte();
         value = value + red;
     }
 

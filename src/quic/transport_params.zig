@@ -259,15 +259,15 @@ pub const TransportParams = struct {
         var fbs = io.fixedBufferStream(data);
         const reader = fbs.reader();
 
-        while (fbs.pos < data.len) {
+        while (fbs.seek < data.len) {
             const param_id = try packet.readVarInt(reader);
             const param_len = try packet.readVarInt(reader);
-            const param_start = fbs.pos;
+            const param_start = fbs.seek;
 
             switch (param_id) {
                 @intFromEnum(ParamId.original_destination_connection_id) => {
-                    params.original_destination_connection_id = data[fbs.pos..][0..param_len];
-                    fbs.pos += param_len;
+                    params.original_destination_connection_id = data[fbs.seek..][0..param_len];
+                    fbs.seek += param_len;
                 },
                 @intFromEnum(ParamId.max_idle_timeout) => {
                     params.max_idle_timeout = try packet.readVarInt(reader);
@@ -329,12 +329,12 @@ pub const TransportParams = struct {
                     params.active_connection_id_limit = try packet.readVarInt(reader);
                 },
                 @intFromEnum(ParamId.initial_source_connection_id) => {
-                    params.initial_source_connection_id = data[fbs.pos..][0..param_len];
-                    fbs.pos += param_len;
+                    params.initial_source_connection_id = data[fbs.seek..][0..param_len];
+                    fbs.seek += param_len;
                 },
                 @intFromEnum(ParamId.retry_source_connection_id) => {
-                    params.retry_source_connection_id = data[fbs.pos..][0..param_len];
-                    fbs.pos += param_len;
+                    params.retry_source_connection_id = data[fbs.seek..][0..param_len];
+                    fbs.seek += param_len;
                 },
                 @intFromEnum(ParamId.max_datagram_frame_size) => {
                     params.max_datagram_frame_size = try packet.readVarInt(reader);
@@ -344,7 +344,7 @@ pub const TransportParams = struct {
                 },
                 @intFromEnum(ParamId.version_information) => {
                     if (param_len < 4 or (param_len % 4) != 0) {
-                        fbs.pos = param_start + param_len;
+                        fbs.seek = param_start + param_len;
                     } else {
                         params.version_info_chosen = try reader.readInt(u32, .big);
                         const avail_count = (param_len - 4) / 4;
@@ -355,19 +355,19 @@ pub const TransportParams = struct {
                         params.version_info_available_count = n;
                         // Skip any extra versions beyond our buffer
                         if (avail_count > 8) {
-                            fbs.pos = param_start + param_len;
+                            fbs.seek = param_start + param_len;
                         }
                     }
                 },
                 else => {
                     // Unknown parameter - skip
-                    fbs.pos = param_start + param_len;
+                    fbs.seek = param_start + param_len;
                 },
             }
 
             // Ensure we consumed exactly param_len bytes
-            if (fbs.pos != param_start + param_len) {
-                fbs.pos = param_start + param_len;
+            if (fbs.seek != param_start + param_len) {
+                fbs.seek = param_start + param_len;
             }
         }
 

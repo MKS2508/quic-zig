@@ -170,7 +170,7 @@ pub fn readDatagramObject(data: []const u8) !DatagramObject {
         const s = track.ObjectStatus.fromInt(raw) orelse return Error.InvalidObjectHeader;
         break :blk .{ .status = s };
     } else .{
-        .payload = data[fbs.pos..],
+        .payload = data[fbs.seek..],
     };
 
     return .{
@@ -211,7 +211,7 @@ test "subgroup header round-trip — explicit subgroup with priority" {
         .per_object_properties = true,
     };
     try writeSubgroupHeader(fbs.writer(), h);
-    const written = fbs.pos;
+    const written = fbs.seek;
 
     var rb = io.fixedBufferStream(@as([]const u8, buf[0..written]));
     const parsed = try readSubgroupHeader(&rb);
@@ -236,7 +236,7 @@ test "subgroup header round-trip — zero subgroup, default priority, end-of-gro
         .per_object_properties = false,
     };
     try writeSubgroupHeader(fbs.writer(), h);
-    var rb = io.fixedBufferStream(@as([]const u8, buf[0..fbs.pos]));
+    var rb = io.fixedBufferStream(@as([]const u8, buf[0..fbs.seek]));
     const parsed = try readSubgroupHeader(&rb);
     try testing.expectEqual(codes.SubgroupIdMode.zero, parsed.id_mode);
     try testing.expect(parsed.header.end_of_group);
@@ -262,7 +262,7 @@ test "datagram object round-trip with payload" {
         .body = .{ .payload = "frame-data" },
     };
     try writeDatagramObject(fbs.writer(), obj);
-    const got = try readDatagramObject(buf[0..fbs.pos]);
+    const got = try readDatagramObject(buf[0..fbs.seek]);
     try testing.expectEqual(@as(u64, 5), got.track_alias);
     try testing.expectEqual(@as(u64, 2), got.group);
     try testing.expectEqual(@as(?u64, 7), got.object);
@@ -282,7 +282,7 @@ test "datagram object with status and zero object id" {
         .body = .{ .status = .does_not_exist },
     };
     try writeDatagramObject(fbs.writer(), obj);
-    const got = try readDatagramObject(buf[0..fbs.pos]);
+    const got = try readDatagramObject(buf[0..fbs.seek]);
     try testing.expectEqual(@as(?u64, null), got.object);
     try testing.expectEqual(@as(?u8, null), got.publisher_priority);
     try testing.expectEqual(track.ObjectStatus.does_not_exist, got.body.status);
@@ -298,7 +298,7 @@ test "fetch stream header round-trip" {
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
     try writeFetchStreamHeader(fbs.writer(), 0xabcd);
-    var rb = io.fixedBufferStream(@as([]const u8, buf[0..fbs.pos]));
+    var rb = io.fixedBufferStream(@as([]const u8, buf[0..fbs.seek]));
     const rid = try readFetchStreamHeader(&rb);
     try testing.expectEqual(@as(u64, 0xabcd), rid);
 }

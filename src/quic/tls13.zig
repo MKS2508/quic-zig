@@ -718,7 +718,7 @@ pub const Tls13Handshake = struct {
         // Pre-encode transport params to avoid dangling slices after struct move
         var tp_fbs = io.fixedBufferStream(&self.tp_encoded);
         local_tp.encode(tp_fbs.writer()) catch {};
-        self.tp_encoded_len = tp_fbs.pos;
+        self.tp_encoded_len = tp_fbs.seek;
 
         // Generate X25519 key pair
         sys.randomBytes(&self.x25519_secret);
@@ -771,7 +771,7 @@ pub const Tls13Handshake = struct {
         // Pre-encode transport params to avoid dangling slices after struct move
         var tp_fbs = io.fixedBufferStream(&self.tp_encoded);
         local_tp.encode(tp_fbs.writer()) catch {};
-        self.tp_encoded_len = tp_fbs.pos;
+        self.tp_encoded_len = tp_fbs.seek;
 
         // Generate X25519 key pair
         sys.randomBytes(&self.x25519_secret);
@@ -1463,7 +1463,7 @@ pub const Tls13Handshake = struct {
                     // Re-encode transport params so EncryptedExtensions carries the updated chosen_version
                     var tp_fbs = io.fixedBufferStream(&self.tp_encoded);
                     self.local_transport_params.encode(tp_fbs.writer()) catch {};
-                    self.tp_encoded_len = tp_fbs.pos;
+                    self.tp_encoded_len = tp_fbs.seek;
                 }
             }
         }

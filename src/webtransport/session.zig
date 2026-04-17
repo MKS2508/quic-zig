@@ -702,7 +702,7 @@ pub const WebTransportConnection = struct {
         if (self.getSession(session_id)) |_| {
             return .{ .datagram = .{
                 .session_id = session_id,
-                .data = self.dgram_poll_buf[fbs.pos..dgram_len],
+                .data = self.dgram_poll_buf[fbs.seek..dgram_len],
             } };
         }
 
@@ -747,8 +747,8 @@ pub const WebTransportConnection = struct {
                 try self.wt_uni_streams.put(stream_id, session_id);
 
                 // Buffer remaining data after the type prefix
-                if (fbs.pos < data.len) {
-                    const remaining = data[fbs.pos..];
+                if (fbs.seek < data.len) {
+                    const remaining = data[fbs.seek..];
                     var buf = self.stream_bufs.getPtr(stream_id) orelse blk: {
                         const new_buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
                         try self.stream_bufs.put(stream_id, new_buf);
@@ -808,8 +808,8 @@ pub const WebTransportConnection = struct {
                 // Buffer remaining data for delivery via pollWtStreamData.
                 // Always return .bidi_stream first so the application can register
                 // the stream before receiving .stream_data events.
-                if (fbs.pos < data.len) {
-                    const remaining = data[fbs.pos..];
+                if (fbs.seek < data.len) {
+                    const remaining = data[fbs.seek..];
                     var buf = self.stream_bufs.getPtr(stream_id) orelse blk: {
                         const new_buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
                         try self.stream_bufs.put(stream_id, new_buf);
@@ -1097,7 +1097,7 @@ fn buildWtControlPayload(buf: []u8) usize {
         .enable_webtransport = true,
         .webtransport_max_sessions = 4,
     } }, fbs.writer()) catch unreachable;
-    return fbs.pos;
+    return fbs.seek;
 }
 
 fn injectPeerControlStream(quic_conn: *quic_connection.Connection, h3: *h3_conn.H3Connection, is_server: bool) !void {
@@ -1128,7 +1128,7 @@ fn buildConnectRequest(buf: []u8, path: []const u8) usize {
     const qpack_len = qpack.encodeHeaders(&headers, &qpack_buf) catch unreachable;
     var fbs = io.fixedBufferStream(buf);
     h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer()) catch unreachable;
-    return fbs.pos;
+    return fbs.seek;
 }
 
 // Build a QPACK-encoded 200 response
@@ -1140,7 +1140,7 @@ fn buildConnectResponse(buf: []u8) usize {
     const qpack_len = qpack.encodeHeaders(&headers, &qpack_buf) catch unreachable;
     var fbs = io.fixedBufferStream(buf);
     h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer()) catch unreachable;
-    return fbs.pos;
+    return fbs.seek;
 }
 
 // Build WT bidi stream type prefix: 0x41 + session_id
@@ -1149,7 +1149,7 @@ fn buildWtBidiPrefix(buf: []u8, session_id: u64) usize {
     const w = fbs.writer();
     packet.writeVarInt(w, WT_BIDI_STREAM_TYPE) catch unreachable;
     packet.writeVarInt(w, session_id) catch unreachable;
-    return fbs.pos;
+    return fbs.seek;
 }
 
 // Build WT uni stream type prefix: 0x54 + session_id
@@ -1158,7 +1158,7 @@ fn buildWtUniPrefix(buf: []u8, session_id: u64) usize {
     const w = fbs.writer();
     packet.writeVarInt(w, WT_UNI_STREAM_TYPE) catch unreachable;
     packet.writeVarInt(w, session_id) catch unreachable;
-    return fbs.pos;
+    return fbs.seek;
 }
 
 // Full setup: QUIC conn + H3 + WT + peer control stream + active session.
@@ -1550,7 +1550,7 @@ test "WT integration: sendDatagram writes quarter_stream_id + payload" {
     const quarter_id = packet.readVarInt(fbs.reader()) catch unreachable;
     try testing.expectEqual(session_id / 4, quarter_id);
     // Rest is payload
-    try testing.expectEqualStrings("dgram payload", dgram_buf[fbs.pos..dgram_len]);
+    try testing.expectEqualStrings("dgram payload", dgram_buf[fbs.seek..dgram_len]);
 }
 
 test "WT integration: poll receives datagram demuxed by session" {
@@ -1564,7 +1564,7 @@ test "WT integration: poll receives datagram demuxed by session" {
     var fbs = io.fixedBufferStream(&dgram_buf);
     packet.writeVarInt(fbs.writer(), quarter_id) catch unreachable;
     fbs.writer().writeAll("hello dgram") catch unreachable;
-    try testing.expect(setup.quic_conn.datagram_recv_queue.push(dgram_buf[0..fbs.pos]));
+    try testing.expect(setup.quic_conn.datagram_recv_queue.push(dgram_buf[0..fbs.seek]));
 
     const ev = try setup.wt.poll();
     try testing.expect(ev != null);
