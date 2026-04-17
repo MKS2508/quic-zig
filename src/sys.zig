@@ -538,13 +538,21 @@ pub const File = struct {
 
     pub const Stat = struct { size: u64 };
 
+    /// Returns file size via lseek (portable across Linux/Darwin/BSD without
+    /// needing the platform-specific fstat struct layout). Preserves file
+    /// position so sequential read()s still work.
     pub fn stat(self: File) !Stat {
-        var st: posix.Stat = undefined;
-        const rc = c.fstat(self.fd, &st);
-        if (rc != 0) switch (posix.errno(rc)) {
+        const cur = c.lseek(self.fd, 0, std.c.SEEK.CUR);
+        if (cur < 0) switch (posix.errno(cur)) {
             else => |err| return unexpected(err),
         };
-        return .{ .size = @intCast(st.size) };
+        const end = c.lseek(self.fd, 0, std.c.SEEK.END);
+        if (end < 0) switch (posix.errno(end)) {
+            else => |err| return unexpected(err),
+        };
+        // Restore original position.
+        _ = c.lseek(self.fd, cur, std.c.SEEK.SET);
+        return .{ .size = @intCast(end) };
     }
 };
 
