@@ -2,7 +2,7 @@
 
 A QUIC / H3 / WebTransport implementation in pure Zig.
 
-> **Current state:** 🚨 Not stable. APIs may change at any time.
+> **Current state:** Not production-ready. Public APIs may still change as the project gets battle-tested.
 
 ---
 
