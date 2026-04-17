@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
-const io = std.io;
+const io = @import("../io_compat.zig");
 
 const quic_connection = @import("../quic/connection.zig");
 const stream_mod = @import("../quic/stream.zig");

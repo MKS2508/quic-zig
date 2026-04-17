@@ -9,7 +9,7 @@
 // as later phases exercise them.
 
 const std = @import("std");
-const io = std.io;
+const io = @import("../io_compat.zig");
 const testing = std.testing;
 
 const wire = @import("wire.zig");

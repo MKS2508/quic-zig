@@ -42,7 +42,7 @@ pub const FrameSorter = struct {
     allocator: Allocator,
 
     /// Buffered data chunks, keyed by offset.
-    chunks: std.AutoArrayHashMap(u64, []const u8),
+    chunks: std.AutoArrayHashMapUnmanaged(u64, []const u8),
 
     /// Next offset to be read by the application.
     read_pos: u64 = 0,
@@ -57,7 +57,7 @@ pub const FrameSorter = struct {
     pub fn init(allocator: Allocator) FrameSorter {
         return .{
             .allocator = allocator,
-            .chunks = std.AutoArrayHashMap(u64, []const u8).init(allocator),
+            .chunks = .{},
         };
     }
 
@@ -66,7 +66,7 @@ pub const FrameSorter = struct {
         for (self.chunks.values()) |data| {
             self.allocator.free(data);
         }
-        self.chunks.deinit();
+        self.chunks.deinit(self.allocator);
     }
 
     /// Return the highest byte offset buffered (or read_pos if no chunks).
@@ -121,7 +121,7 @@ pub const FrameSorter = struct {
         const owned = try self.allocator.dupe(u8, effective_data);
         errdefer self.allocator.free(owned);
 
-        try self.chunks.put(effective_offset, owned);
+        try self.chunks.put(self.allocator, effective_offset, owned);
 
         const end_offset = effective_offset + owned.len;
         if (end_offset > self.highest_buffered) self.highest_buffered = end_offset;

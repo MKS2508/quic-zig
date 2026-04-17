@@ -1,4 +1,6 @@
 const std = @import("std");
+const quic = @import("quic");
+const sys = quic.sys;
 const posix = std.posix;
 const xev = @import("xev");
 
@@ -91,14 +93,14 @@ const Stats = struct {
 // ============================================================================
 
 fn createSocket(port: u16) posix.socket_t {
-    const fd = posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0) catch @panic("socket");
+    const fd = sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0) catch @panic("socket");
     const yes: c_int = 1;
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&yes)) catch {};
     var addr: posix.sockaddr.in = .{
         .port = std.mem.nativeToBig(u16, port),
         .addr = 0, // INADDR_ANY
     };
-    posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch @panic("bind");
+    sys.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch @panic("bind");
     return fd;
 }
 
@@ -114,9 +116,9 @@ fn recvAndEcho(sockfd: posix.socket_t, recv_buf: []u8) void {
     while (true) {
         var from_addr: posix.sockaddr.in = undefined;
         var from_len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-        const bytes = posix.recvfrom(sockfd, recv_buf, 0, @ptrCast(&from_addr), &from_len) catch break;
+        const bytes = sys.recvfrom(sockfd, recv_buf, 0, @ptrCast(&from_addr), &from_len) catch break;
         if (bytes >= 16) {
-            _ = posix.sendto(sockfd, recv_buf[0..bytes], 0, @ptrCast(&from_addr), from_len) catch {};
+            _ = sys.sendto(sockfd, recv_buf[0..bytes], 0, @ptrCast(&from_addr), from_len) catch {};
         }
     }
 }
@@ -137,8 +139,8 @@ fn senderThread(args: *SenderArgs) void {
     // Wait for server to be ready
     while (!args.ready.load(.acquire)) std.Thread.yield() catch {};
 
-    const fd = posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch @panic("sender socket");
-    defer posix.close(fd);
+    const fd = sys.socket(posix.AF.INET, posix.SOCK.DGRAM, 0) catch @panic("sender socket");
+    defer sys.close(fd);
 
     var dest = serverAddr();
     var recv_buf: [32]u8 = undefined;
@@ -146,10 +148,10 @@ fn senderThread(args: *SenderArgs) void {
     for (0..args.iterations) |i| {
         var pkt: [16]u8 = undefined;
         std.mem.writeInt(u64, pkt[0..8], @intCast(i), .little);
-        const send_time: i64 = @intCast(std.time.nanoTimestamp());
+        const send_time: i64 = sys.nanoTimestamp();
         std.mem.writeInt(i64, pkt[8..16], send_time, .little);
 
-        _ = posix.sendto(fd, &pkt, 0, @ptrCast(&dest), @sizeOf(posix.sockaddr.in)) catch continue;
+        _ = sys.sendto(fd, &pkt, 0, @ptrCast(&dest), @sizeOf(posix.sockaddr.in)) catch continue;
 
         // Blocking recv with timeout
         var poll_fd = [1]posix.pollfd{.{
@@ -159,9 +161,9 @@ fn senderThread(args: *SenderArgs) void {
         }};
         const poll_ret = posix.poll(&poll_fd, 100) catch 0; // 100ms timeout
         if (poll_ret > 0) {
-            const n = posix.recvfrom(fd, &recv_buf, 0, null, null) catch 0;
+            const n = sys.recvfrom(fd, &recv_buf, 0, null, null) catch 0;
             if (n >= 16) {
-                const recv_time: i64 = @intCast(std.time.nanoTimestamp());
+                const recv_time: i64 = sys.nanoTimestamp();
                 const orig_send = std.mem.readInt(i64, recv_buf[8..16], .little);
                 args.rtts[i] = recv_time - orig_send;
             } else {
@@ -171,7 +173,7 @@ fn senderThread(args: *SenderArgs) void {
             args.rtts[i] = 100_000_000;
         }
 
-        if (args.interval_us > 0) std.Thread.sleep(args.interval_us * 1000);
+        if (args.interval_us > 0) sys.sleepNs(args.interval_us * 1000);
     }
     args.done.store(true, .release);
 }
@@ -182,7 +184,7 @@ fn senderThread(args: *SenderArgs) void {
 
 fn rawKqueueBench(iterations: usize, interval_us: u64) Stats {
     const sockfd = createSocket(PORT);
-    defer posix.close(sockfd);
+    defer sys.close(sockfd);
 
     const rtts = std.heap.page_allocator.alloc(i64, iterations) catch @panic("alloc");
 
@@ -198,8 +200,10 @@ fn rawKqueueBench(iterations: usize, interval_us: u64) Stats {
     const sender = std.Thread.spawn(.{}, senderThread, .{&sender_args}) catch @panic("spawn");
 
     // Raw kqueue
-    const kq = posix.kqueue() catch @panic("kqueue");
-    defer posix.close(kq);
+    const kq_rc = std.c.kqueue();
+    if (kq_rc < 0) @panic("kqueue");
+    const kq: sys.fd_t = @intCast(kq_rc);
+    defer sys.close(kq);
 
     var changelist = [1]std.c.Kevent{.{
         .ident = @intCast(sockfd),
@@ -302,7 +306,7 @@ fn xevRescheduleTimer(state: *XevState) void {
 
 fn xevBench(iterations: usize, interval_us: u64, timer_ms: u64) Stats {
     const sockfd = createSocket(PORT);
-    defer posix.close(sockfd);
+    defer sys.close(sockfd);
 
     const rtts = std.heap.page_allocator.alloc(i64, iterations) catch @panic("alloc");
 
@@ -365,9 +369,9 @@ fn xevOnReadableWithWork(
     xevRescheduleTimer(state);
 
     // Simulate ~50us of QUIC processing work
-    const start: i64 = @intCast(std.time.nanoTimestamp());
+    const start: i64 = sys.nanoTimestamp();
     while (true) {
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        const now: i64 = sys.nanoTimestamp();
         if (now - start > 50_000) break; // 50us
     }
 
@@ -380,7 +384,7 @@ fn xevOnReadableWithWork(
 
 fn xevWorkBench(iterations: usize, interval_us: u64, timer_ms: u64) Stats {
     const sockfd = createSocket(PORT);
-    defer posix.close(sockfd);
+    defer sys.close(sockfd);
 
     const rtts = std.heap.page_allocator.alloc(i64, iterations) catch @panic("alloc");
 
@@ -429,7 +433,7 @@ fn xevWorkBench(iterations: usize, interval_us: u64, timer_ms: u64) Stats {
 // Main
 // ============================================================================
 
-pub fn main() !void {
+pub fn main(_: std.process.Init.Minimal) !void {
     const iterations: usize = 1000;
     const interval_us: u64 = 1000; // 1ms between packets
     const timer_ms: u64 = 28; // Simulated PTO timer
@@ -444,7 +448,7 @@ pub fn main() !void {
         stats.print("Raw kqueue (baseline)");
     }
 
-    std.Thread.sleep(100_000_000); // 100ms between modes
+    sys.sleepNs(100_000_000); // 100ms between modes
 
     {
         std.debug.print("\nStarting: libxev poll + timer...\n", .{});
@@ -452,7 +456,7 @@ pub fn main() !void {
         stats.print("libxev poll + 28ms timer");
     }
 
-    std.Thread.sleep(100_000_000);
+    sys.sleepNs(100_000_000);
 
     {
         std.debug.print("\nStarting: libxev poll + timer + 50us work...\n", .{});

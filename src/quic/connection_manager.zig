@@ -1,7 +1,8 @@
 const std = @import("std");
+const sys = @import("../sys.zig");
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
-const io = std.io;
+const io = @import("../io_compat.zig");
 
 const connection = @import("connection.zig");
 const packet = @import("packet.zig");
@@ -335,7 +336,7 @@ pub const ConnectionManager = struct {
                     if (header.token == null or header.token.?.len == 0) {
                         // No token: send Retry
                         var retry_scid: [8]u8 = undefined;
-                        std.crypto.random.bytes(&retry_scid);
+                        sys.randomBytes(&retry_scid);
 
                         var token_buf: [packet.TOKEN_MAX_LEN]u8 = undefined;
                         const token_len = packet.generateRetryToken(

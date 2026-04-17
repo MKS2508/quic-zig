@@ -38,14 +38,14 @@ const QuicEchoClient = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     var port: u16 = 4434;
     var insecure = false;
-    var args = std.process.args();
+    var args = std.process.Args.Iterator.init(init.args);
     _ = args.next();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {

@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const net = std.net;
+const net = @import("quic").net_compat;
 
 // Suppress verbose QUIC/TLS debug logging during benchmarks
 pub const std_options: std.Options = .{
@@ -17,6 +17,7 @@ pub const std_options: std.Options = .{
 };
 
 const quic = @import("quic");
+const sys = quic.sys;
 const connection = quic.connection;
 const Connection = connection.Connection;
 const tls13 = quic.tls13;
@@ -43,7 +44,7 @@ const Config = struct {
 // ════════════════════════════════════════════════════════
 
 fn timestamp() i64 {
-    return @intCast(std.time.nanoTimestamp());
+    return sys.nanoTimestamp();
 }
 
 fn nsToMs(ns: i64) f64 {
@@ -62,9 +63,9 @@ fn percentile(sorted: []const i64, p: f64) i64 {
 // ════════════════════════════════════════════════════════
 
 fn createSocket() !struct { fd: posix.socket_t, addr: net.Address } {
-    const fd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+    const fd = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
     const addr = try net.Address.parseIp4("127.0.0.1", 0);
-    try posix.bind(fd, &addr.any, addr.getOsSockLen());
+    try sys.bind(fd, &addr.any, addr.getOsSockLen());
     ecn_socket.enableEcnRecv(fd) catch {};
     return .{ .fd = fd, .addr = addr };
 }
@@ -97,7 +98,7 @@ fn flushSend(fd: posix.socket_t, conn: *Connection, remote: *const posix.sockadd
         const n = conn.send(&out) catch break;
         if (n == 0) break;
         ecn_socket.setEcnMark(fd, conn.getEcnMark()) catch {};
-        _ = posix.sendto(fd, out[0..n], 0, @ptrCast(remote), asz) catch break;
+        _ = sys.sendto(fd, out[0..n], 0, @ptrCast(remote), asz) catch break;
     }
 }
 
@@ -144,13 +145,13 @@ fn establishSession(
         flushSend(fd, conn, remote, asz.*);
         recvAll(fd, conn, local, remote, asz);
         if (conn.state == .connected) break;
-        std.Thread.sleep(200 * std.time.ns_per_us);
+        sys.sleepNs(200 * std.time.ns_per_us);
     }
     if (conn.state != .connected) return error.HandshakeFailed;
 
     // Post-handshake flush
     flushSend(fd, conn, remote, asz.*);
-    std.Thread.sleep(2 * std.time.ns_per_ms);
+    sys.sleepNs(2 * std.time.ns_per_ms);
     recvAll(fd, conn, local, remote, asz);
     conn.onTimeout() catch {};
     flushSend(fd, conn, remote, asz.*);
@@ -179,7 +180,7 @@ fn establishSession(
     // Wait for session_ready
     iter = 0;
     while (iter < 500) : (iter += 1) {
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        sys.sleepNs(1 * std.time.ns_per_ms);
         ioTick(fd, conn, local, remote, asz);
 
         while (true) {
@@ -223,7 +224,7 @@ fn benchHandshake(alloc: std.mem.Allocator, config: Config) !void {
             fail += 1;
             continue;
         };
-        defer posix.close(sock.fd);
+        defer sys.close(sock.fd);
 
         var conn: Connection = undefined;
         var h3c: h3.H3Connection = undefined;
@@ -269,7 +270,7 @@ fn benchStream(alloc: std.mem.Allocator, config: Config) !void {
     std.debug.print("\n  Stream Throughput ({d} rounds x {d}B)\n  ──────────────────────────────────────\n", .{ config.stream_rounds, config.stream_payload });
 
     const sock = try createSocket();
-    defer posix.close(sock.fd);
+    defer sys.close(sock.fd);
 
     const alpn = try alloc.alloc([]const u8, 1);
     alpn[0] = "h3";
@@ -326,7 +327,7 @@ fn benchStream(alloc: std.mem.Allocator, config: Config) !void {
             }
 
             if (total_received >= bytes_sent) break;
-            std.Thread.sleep(50 * std.time.ns_per_us);
+            sys.sleepNs(50 * std.time.ns_per_us);
         }
     }
 
@@ -355,7 +356,7 @@ fn benchDatagram(alloc: std.mem.Allocator, config: Config) !void {
     std.debug.print("\n  Datagram Throughput ({d}s)\n  ─────────────────────────\n", .{config.datagram_duration_s});
 
     const sock = try createSocket();
-    defer posix.close(sock.fd);
+    defer sys.close(sock.fd);
 
     const alpn = try alloc.alloc([]const u8, 1);
     alpn[0] = "h3";
@@ -414,7 +415,7 @@ fn benchDatagram(alloc: std.mem.Allocator, config: Config) !void {
             }
         }
 
-        if (batch == 0) std.Thread.sleep(100 * std.time.ns_per_us);
+        if (batch == 0) sys.sleepNs(100 * std.time.ns_per_us);
     }
 
     const elapsed_ns = timestamp() - start;
@@ -439,13 +440,13 @@ fn benchDatagram(alloc: std.mem.Allocator, config: Config) !void {
 // Main
 // ════════════════════════════════════════════════════════
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     var config = Config{};
-    var args = std.process.args();
+    var args = std.process.Args.Iterator.init(init.args);
     _ = args.next();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {

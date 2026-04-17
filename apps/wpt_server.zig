@@ -1,5 +1,6 @@
 const std = @import("std");
 const quic = @import("quic");
+const sys = quic.sys;
 const event_loop = quic.event_loop;
 const tls13 = quic.tls13;
 const wt_session = quic.webtransport;
@@ -433,7 +434,7 @@ const WptHandler = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -443,7 +444,7 @@ pub fn main() !void {
     var cert_path: []const u8 = "interop/browser/certs/server.crt";
     var key_path: []const u8 = "interop/browser/certs/server.key";
 
-    var args = std.process.args();
+    var args = std.process.Args.Iterator.init(init.args);
     _ = args.next();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
@@ -456,7 +457,7 @@ pub fn main() !void {
     }
 
     // Print certificate SHA-256 hash for browser pinning
-    const server_cert_pem = try std.fs.cwd().readFileAlloc(alloc, cert_path, 8192);
+    const server_cert_pem = try sys.readFileAlloc(alloc, cert_path, 8192);
     var cert_der_buf: [4096]u8 = undefined;
     const cert_der = try tls13.parsePemCert(server_cert_pem, &cert_der_buf);
 

@@ -14,10 +14,12 @@
 
 const std = @import("std");
 const posix = std.posix;
-const net = std.net;
+const net = @import("quic").net_compat;
 const mem = std.mem;
 
 const lib = @import("quic");
+const io_compat = lib.io_compat;
+const sys = lib.sys;
 const connection = lib.connection;
 const quic_crypto = lib.crypto;
 const tls13 = lib.tls13;
@@ -169,17 +171,17 @@ const SessionState = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     // Read environment variables
-    const testcase_str = posix.getenv("TESTCASE") orelse "handshake";
+    const testcase_str = sys.getenv("TESTCASE") orelse "handshake";
     const testcase = parseTestCase(testcase_str);
-    const sslkeylogfile_path = posix.getenv("SSLKEYLOGFILE");
-    const qlog_dir = posix.getenv("QLOGDIR");
-    const protocols_str = posix.getenv("PROTOCOLS") orelse "";
+    const sslkeylogfile_path = sys.getenv("SSLKEYLOGFILE");
+    const qlog_dir = sys.getenv("QLOGDIR");
+    const protocols_str = sys.getenv("PROTOCOLS") orelse "";
 
     std.log.info("interop wt client: testcase={s}", .{testcase_str});
 
@@ -198,9 +200,10 @@ pub fn main() !void {
     }
 
     // Parse request URLs from CLI args
-    const args = try std.process.argsAlloc(alloc);
+    var args_iter = std.process.Args.Iterator.init(init.args);
+    _ = args_iter.next(); // skip program name
     var urls: std.ArrayList(ParsedUrl) = .{ .items = &.{}, .capacity = 0 };
-    for (args[1..]) |arg| {
+    while (args_iter.next()) |arg| {
         if (parseUrl(arg)) |url| {
             try urls.append(alloc, url);
         }
@@ -216,8 +219,8 @@ pub fn main() !void {
     std.log.info("parsed {d} endpoint group(s) from {d} URL(s)", .{ groups.items.len, urls.items.len });
 
     // Open SSLKEYLOGFILE if requested
-    const keylog_file: ?std.fs.File = if (sslkeylogfile_path) |path|
-        std.fs.cwd().createFile(path, .{}) catch null
+    const keylog_file: ?sys.File = if (sslkeylogfile_path) |path|
+        sys.createFile(path) catch null
     else
         null;
     defer if (keylog_file) |f| f.close();
@@ -225,29 +228,19 @@ pub fn main() !void {
     // Resolve server address
     const host = urls.items[0].host;
     const port = urls.items[0].port;
-    const server_addr = blk: {
-        break :blk net.Address.resolveIp(host, port) catch {
-            const list = net.getAddressList(alloc, host, port) catch |err| {
-                std.log.err("failed to resolve {s}:{d}: {any}", .{ host, port, err });
-                return err;
-            };
-            defer list.deinit();
-            if (list.addrs.len == 0) {
-                std.log.err("no addresses for {s}:{d}", .{ host, port });
-                return error.UnknownHostName;
-            }
-            break :blk list.addrs[0];
-        };
+    const server_addr = net.Address.parseIp(host, port) catch |err| {
+        std.log.err("failed to parse {s}:{d}: {any}", .{ host, port, err });
+        return err;
     };
 
     // Create dual-stack UDP socket
-    const sockfd = try posix.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-    defer posix.close(sockfd);
+    const sockfd = try sys.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+    defer sys.close(sockfd);
     const IPV6_V6ONLY: u32 = if (@import("builtin").os.tag == .linux) 26 else 27;
     const zero: c_int = 0;
     posix.setsockopt(sockfd, posix.IPPROTO.IPV6, IPV6_V6ONLY, mem.asBytes(&zero)) catch {};
     const local_addr = try net.Address.parseIp6("::", 0);
-    try posix.bind(sockfd, &local_addr.any, local_addr.getOsSockLen());
+    try sys.bind(sockfd, &local_addr.any, local_addr.getOsSockLen());
     ecn_socket.enableEcnRecv(sockfd) catch {};
 
     // Build TLS config (h3 ALPN for WebTransport)
@@ -280,8 +273,8 @@ pub fn main() !void {
 
     // ---- Handshake phase ----
     var handshake_complete = false;
-    const handshake_start = std.time.nanoTimestamp();
-    while (!handshake_complete and (std.time.nanoTimestamp() - handshake_start) < TIMEOUT_NS) {
+    const handshake_start = sys.nanoTimestamp();
+    while (!handshake_complete and (sys.nanoTimestamp() - handshake_start) < TIMEOUT_NS) {
         conn.onTimeout() catch {};
         {
             var sc: usize = 0;
@@ -289,7 +282,7 @@ pub fn main() !void {
                 const bw = conn.send(&out) catch break;
                 if (bw == 0) break;
                 ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-                _ = posix.sendto(sockfd, out[0..bw], 0, @ptrCast(&remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..bw], 0, @ptrCast(&remote_addr), addr_size) catch {};
             }
         }
         var received_any = false;
@@ -313,10 +306,10 @@ pub fn main() !void {
                 const fb = conn.send(&out) catch break;
                 if (fb == 0) break;
                 ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-                _ = posix.sendto(sockfd, out[0..fb], 0, @ptrCast(&remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..fb], 0, @ptrCast(&remote_addr), addr_size) catch {};
             }
         }
-        if (!received_any) std.Thread.sleep(1 * std.time.ns_per_ms);
+        if (!received_any) sys.sleepNs(1 * std.time.ns_per_ms);
     }
 
     if (!handshake_complete) {
@@ -332,7 +325,7 @@ pub fn main() !void {
             const bw = conn.send(&out) catch break;
             if (bw == 0) break;
             ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-            _ = posix.sendto(sockfd, out[0..bw], 0, @ptrCast(&remote_addr), addr_size) catch {};
+            _ = sys.sendto(sockfd, out[0..bw], 0, @ptrCast(&remote_addr), addr_size) catch {};
         }
     }
 
@@ -358,13 +351,13 @@ pub fn main() !void {
 
     // Wait for server's SETTINGS before opening sessions (need to know if WT is enabled)
     {
-        const settings_start = std.time.nanoTimestamp();
-        while (!h3c.peer_settings_received and (std.time.nanoTimestamp() - settings_start) < 10 * std.time.ns_per_s) {
+        const settings_start = sys.nanoTimestamp();
+        while (!h3c.peer_settings_received and (sys.nanoTimestamp() - settings_start) < 10 * std.time.ns_per_s) {
             drainRecv(&conn, sockfd, local_addr, &remote_addr, &addr_size);
             conn.onTimeout() catch {};
             _ = wt.poll() catch {};
             burstSend(&conn, sockfd, &out, &remote_addr, addr_size);
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            sys.sleepNs(1 * std.time.ns_per_ms);
         }
         if (!h3c.peer_settings_received) {
             std.log.warn("did not receive server SETTINGS, proceeding anyway", .{});
@@ -385,7 +378,7 @@ pub fn main() !void {
 
         if (client_protocols.items.len > 0) {
             // Send as HTTP Structured Fields list of quoted strings (RFC 8941)
-            var fbs = std.io.fixedBufferStream(&proto_header_buf);
+            var fbs = io_compat.fixedBufferStream(&proto_header_buf);
             for (client_protocols.items, 0..) |p, idx| {
                 if (idx > 0) fbs.writer().writeAll(", ") catch {};
                 fbs.writer().writeByte('"') catch {};
@@ -421,12 +414,12 @@ pub fn main() !void {
     burstSend(&conn, sockfd, &out, &remote_addr, addr_size);
 
     // ---- Main event loop ----
-    const start_time = std.time.nanoTimestamp();
+    const start_time = sys.nanoTimestamp();
     var done = false;
     // transfer mode (responder) runs until killed; receive modes have a timeout
     const has_timeout = (testcase != .transfer);
 
-    while (!done and (!has_timeout or (std.time.nanoTimestamp() - start_time) < TIMEOUT_NS)) {
+    while (!done and (!has_timeout or (sys.nanoTimestamp() - start_time) < TIMEOUT_NS)) {
         if (conn.isClosed() or conn.isDraining()) {
             std.log.warn("connection terminated", .{});
             break;
@@ -462,7 +455,7 @@ pub fn main() !void {
             // Continue drip-feeding GET requests for datagram-receive test
             // Pace at 20ms intervals (matching Go interop's time.Sleep(20ms))
             if (ss.dgram_get_offset < ss.files.len and ss.session_ready) {
-                const now_ns = std.time.nanoTimestamp();
+                const now_ns = sys.nanoTimestamp();
                 const elapsed = now_ns - ss.last_dgram_get_time;
                 if (elapsed >= 20 * std.time.ns_per_ms) {
                     if (!wt.isDatagramSendQueueFull()) {
@@ -479,13 +472,13 @@ pub fn main() !void {
         // Burst send
         burstSend(&conn, sockfd, &out, &remote_addr, addr_size);
 
-        if (packets_received == 0) std.Thread.sleep(200 * std.time.ns_per_us);
+        if (packets_received == 0) sys.sleepNs(200 * std.time.ns_per_us);
     }
 
     if (done) {
         // Final flush
         burstSend(&conn, sockfd, &out, &remote_addr, addr_size);
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        sys.sleepNs(100 * std.time.ns_per_ms);
         burstSend(&conn, sockfd, &out, &remote_addr, addr_size);
         std.log.info("interop wt client: test complete", .{});
         std.process.exit(0);
@@ -553,7 +546,7 @@ fn pollWtEvents(
                     if (std.fmt.bufPrint(&get_buf, "GET {s}", .{state.files[0]})) |get_msg| {
                         wt.sendDatagram(state.session_id, get_msg) catch {};
                         state.dgram_get_offset = 1;
-                        state.last_dgram_get_time = std.time.nanoTimestamp();
+                        state.last_dgram_get_time = sys.nanoTimestamp();
                     } else |_| {}
                 }
             },
@@ -881,7 +874,7 @@ fn readFileFromWww(alloc: std.mem.Allocator, www_dir: []const u8, endpoint: []co
     @memcpy(path_buf[pos..][0..filename.len], filename);
     pos += filename.len;
 
-    return std.fs.cwd().readFileAlloc(alloc, path_buf[0..pos], MAX_FILE_SIZE);
+    return sys.readFileAlloc(alloc, path_buf[0..pos], MAX_FILE_SIZE);
 }
 
 fn fileExists(dir: []const u8, filename: []const u8) bool {
@@ -895,7 +888,8 @@ fn fileExists(dir: []const u8, filename: []const u8) bool {
     }
     @memcpy(path_buf[pos..][0..filename.len], filename);
     pos += filename.len;
-    _ = std.fs.cwd().statFile(path_buf[0..pos]) catch return false;
+    const f = sys.openFileRead(path_buf[0..pos]) catch return false;
+    f.close();
     return true;
 }
 
@@ -913,12 +907,12 @@ fn saveFile(dir: []const u8, filename: []const u8, data: []const u8) !void {
 
     const path = path_buf[0..pos];
 
-    // Create parent directory if needed
+    // Create parent directory if needed (best-effort; single level).
     if (mem.lastIndexOf(u8, path, "/")) |last_slash| {
-        std.fs.cwd().makePath(path[0..last_slash]) catch {};
+        sys.makeDir(path[0..last_slash]) catch {};
     }
 
-    const file = try std.fs.cwd().createFile(path, .{});
+    const file = try sys.createFile(path);
     defer file.close();
     try file.writeAll(data);
     std.log.info("saved {s} ({d} bytes)", .{ path, data.len });
@@ -930,7 +924,7 @@ fn burstSend(conn: *connection.Connection, sockfd: posix.fd_t, out: *[MAX_DATAGR
         const bw = conn.send(out) catch break;
         if (bw == 0) break;
         ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-        _ = posix.sendto(sockfd, out[0..bw], 0, @ptrCast(remote_addr), addr_size) catch {};
+        _ = sys.sendto(sockfd, out[0..bw], 0, @ptrCast(remote_addr), addr_size) catch {};
     }
 }
 

@@ -15,8 +15,9 @@
 
 const std = @import("std");
 const posix = std.posix;
-const net = std.net;
+const net = @import("quic").net_compat;
 const quic = @import("quic");
+const sys = quic.sys;
 const quic_lb = quic.quic_lb;
 
 const MAX_PACKET_SIZE: usize = 1500;
@@ -56,7 +57,7 @@ const LbConfig = struct {
 fn parseConfigFile(path: []const u8, allocator: std.mem.Allocator) !LbConfig {
     var config = LbConfig{};
 
-    const file_data = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024);
+    const file_data = try sys.readFileAlloc(allocator, path, 64 * 1024);
     defer allocator.free(file_data);
 
     var line_iter = std.mem.splitScalar(u8, file_data, '\n');
@@ -162,13 +163,13 @@ fn findBackend(config: *const LbConfig, server_id: []const u8) ?net.Address {
     return null;
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init.Minimal) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     // Parse command-line args
-    var args = std.process.args();
+    var args = std.process.Args.Iterator.init(init.args);
     _ = args.next(); // skip program name
     const config_path = args.next() orelse {
         std.log.err("usage: quic-lb <config-file>", .{});
@@ -189,11 +190,11 @@ pub fn main() !void {
     std.log.info("QUIC-LB: {d} backend server(s) configured", .{config.server_count});
 
     // Create UDP socket
-    const sock = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-    defer posix.close(sock);
+    const sock = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+    defer sys.close(sock);
 
     // Bind to listen address
-    try posix.bind(sock, &config.listen_addr.any, config.listen_addr.getOsSockLen());
+    try sys.bind(sock, &config.listen_addr.any, config.listen_addr.getOsSockLen());
     std.log.info("QUIC-LB: listening on port {d}", .{config.listen_addr.getPort()});
 
     // Client mappings for return traffic
@@ -207,11 +208,11 @@ pub fn main() !void {
     while (true) {
         // Try to receive a packet
         addr_len = @sizeOf(posix.sockaddr.storage);
-        const recv_result = posix.recvfrom(sock, &recv_buf, 0, @ptrCast(&src_addr), &addr_len);
+        const recv_result = sys.recvfrom(sock, &recv_buf, 0, @ptrCast(&src_addr), &addr_len);
         const n = recv_result catch |err| {
             if (err == error.WouldBlock) {
                 // No data, sleep briefly
-                std.Thread.sleep(1_000_000); // 1ms
+                sys.sleepNs(1_000_000); // 1ms
                 continue;
             }
             std.log.err("recvfrom error: {any}", .{err});
@@ -220,7 +221,7 @@ pub fn main() !void {
 
         if (n < 1) continue;
 
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        const now: i64 = sys.nanoTimestamp();
 
         // Check if this is from a known backend (return traffic)
         if (isFromBackend(&config, &src_addr)) {
@@ -237,7 +238,7 @@ pub fn main() !void {
                     @sizeOf(posix.sockaddr.in6)
                 else
                     @sizeOf(posix.sockaddr.in);
-                _ = posix.sendto(sock, recv_buf[0..n], 0, client_sa, client_addr_len) catch |err| {
+                _ = sys.sendto(sock, recv_buf[0..n], 0, client_sa, client_addr_len) catch |err| {
                     std.log.err("sendto client error: {any}", .{err});
                     continue;
                 };
@@ -312,7 +313,7 @@ pub fn main() !void {
         }
 
         // Forward to backend
-        _ = posix.sendto(sock, recv_buf[0..n], 0, &dest.any, dest.getOsSockLen()) catch |err| {
+        _ = sys.sendto(sock, recv_buf[0..n], 0, &dest.any, dest.getOsSockLen()) catch |err| {
             std.log.err("sendto backend error: {any}", .{err});
             continue;
         };

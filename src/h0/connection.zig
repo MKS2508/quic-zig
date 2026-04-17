@@ -5,7 +5,8 @@
 // Client: write "GET /path\r\n" to bidi stream, read response, save to file.
 
 const std = @import("std");
-const io = std.io;
+const sys = @import("../sys.zig");
+const io = @import("../io_compat.zig");
 const fs = std.fs;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
@@ -131,7 +132,7 @@ pub const H0Connection = struct {
         const full_path = full_path_buf[0..full_path_pos];
 
         // Read file
-        const file_data = std.fs.cwd().readFileAlloc(self.allocator, full_path, MAX_FILE_SIZE) catch |err| {
+        const file_data = sys.readFileAlloc(self.allocator, full_path, MAX_FILE_SIZE) catch |err| {
             std.log.err("H0: failed to read file '{s}': {any}", .{ full_path, err });
             // Close stream with empty response on file not found
             const streams_map = &self.quic_conn.streams;

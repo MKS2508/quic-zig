@@ -1,4 +1,6 @@
 const std = @import("std");
+const io = @import("../io_compat.zig");
+const sys = @import("../sys.zig");
 const testing = std.testing;
 
 const posix = std.posix;
@@ -227,7 +229,7 @@ pub const TransportParams = struct {
         // with ID of form 31*N+27 so peers learn to ignore unknown parameters.
         {
             var grease_entropy: [6]u8 = undefined;
-            std.crypto.random.bytes(&grease_entropy);
+            sys.randomBytes(&grease_entropy);
             // Pick N in [0..255], giving IDs like 27, 58, 89, ...
             const n: u64 = @as(u64, grease_entropy[0]);
             const grease_id: u64 = 31 * n + 27;
@@ -254,7 +256,7 @@ pub const TransportParams = struct {
     /// Decode transport parameters from a buffer.
     pub fn decode(data: []const u8) !TransportParams {
         var params = TransportParams{};
-        var fbs = std.io.fixedBufferStream(data);
+        var fbs = io.fixedBufferStream(data);
         const reader = fbs.reader();
 
         while (fbs.pos < data.len) {
@@ -389,7 +391,7 @@ test "TransportParams: encode and decode roundtrip" {
     };
 
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = io.fixedBufferStream(&buf);
     try original.encode(fbs.writer());
 
     const encoded = fbs.getWritten();
@@ -416,7 +418,7 @@ test "TransportParams: default values" {
 test "TransportParams: encode empty params" {
     const params = TransportParams{};
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = io.fixedBufferStream(&buf);
     try params.encode(fbs.writer());
 
     // Empty params should produce minimal output
@@ -444,7 +446,7 @@ test "TransportParams: preferred_address roundtrip" {
     };
 
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = io.fixedBufferStream(&buf);
     try original.encode(fbs.writer());
 
     const decoded = try TransportParams.decode(fbs.getWritten());
@@ -482,7 +484,7 @@ test "TransportParams: disable_active_migration roundtrip" {
     };
 
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = io.fixedBufferStream(&buf);
     try original.encode(fbs.writer());
 
     const decoded = try TransportParams.decode(fbs.getWritten());
@@ -499,7 +501,7 @@ test "TransportParams: version_information roundtrip" {
     original.version_info_available_count = 2;
 
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = io.fixedBufferStream(&buf);
     try original.encode(fbs.writer());
 
     const decoded = try TransportParams.decode(fbs.getWritten());
@@ -520,7 +522,7 @@ test "TransportParams: connection IDs roundtrip" {
     };
 
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = io.fixedBufferStream(&buf);
     try original.encode(fbs.writer());
 
     const decoded = try TransportParams.decode(fbs.getWritten());
@@ -538,7 +540,7 @@ test "TransportParams: greasing roundtrip" {
     };
 
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var fbs = io.fixedBufferStream(&buf);
     try original.encode(fbs.writer());
 
     // Decode should succeed — unknown params (greased) are silently ignored
@@ -549,7 +551,7 @@ test "TransportParams: greasing roundtrip" {
     // Encode twice — greased IDs are random so encoded length may differ,
     // but both must decode to same semantic values
     var buf2: [512]u8 = undefined;
-    var fbs2 = std.io.fixedBufferStream(&buf2);
+    var fbs2 = io.fixedBufferStream(&buf2);
     try original.encode(fbs2.writer());
     const decoded2 = try TransportParams.decode(fbs2.getWritten());
     try std.testing.expectEqual(@as(u64, 30000), decoded2.max_idle_timeout);

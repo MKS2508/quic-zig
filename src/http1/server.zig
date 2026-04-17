@@ -3,12 +3,16 @@
 // Runs on a dedicated thread alongside the QUIC event loop, sharing the same
 // TLS certificate. Serves files from a configurable directory and advertises
 // HTTP/3 via Alt-Svc header.
+//
+// Ported to Zig 0.16: TCP listener uses raw sys.* syscall wrappers since
+// std.net.Server was removed; file serving uses sys.openFileRead against
+// composed paths ("{static_dir}/{file_path}") rather than dir.openFile.
 
 const std = @import("std");
 const posix = std.posix;
-const net = std.net;
-const fs = std.fs;
 const log = std.log.scoped(.http1);
+const sys = @import("../sys.zig");
+const net = @import("../net_compat.zig");
 const tls = @import("tls.zig");
 const tls13 = @import("../quic/tls13.zig");
 
@@ -22,7 +26,7 @@ pub const Http1Config = struct {
 };
 
 pub const Http1Server = struct {
-    listener: net.Server,
+    listener_fd: sys.socket_t,
     static_dir: []const u8,
     alt_svc_value: [64]u8 = undefined,
     alt_svc_len: u8 = 0,
@@ -39,12 +43,18 @@ pub const Http1Server = struct {
         const port = config.port orelse quic_port;
         const addr = try net.Address.parseIp4(address, port);
 
-        const listener = try addr.listen(.{
-            .reuse_address = true,
-        });
+        const fd = try sys.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+        errdefer sys.close(fd);
+
+        // Allow immediate reuse after restart.
+        const yes: c_int = 1;
+        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&yes)) catch {};
+
+        try sys.bind(fd, &addr.any, addr.getOsSockLen());
+        try sys.listen(fd, 128);
 
         var server = Http1Server{
-            .listener = listener,
+            .listener_fd = fd,
             .static_dir = config.static_dir,
             .tls_config = tls_config,
         };
@@ -66,7 +76,7 @@ pub const Http1Server = struct {
     pub fn stop(self: *Http1Server) void {
         self.running = false;
         // Close the listener to unblock accept()
-        self.listener.deinit();
+        sys.close(self.listener_fd);
     }
 
     pub fn deinit(self: *Http1Server) void {
@@ -79,19 +89,19 @@ pub const Http1Server = struct {
 
     fn acceptLoop(self: *Http1Server) void {
         while (self.running) {
-            const conn = self.listener.accept() catch {
+            const fd = sys.accept(self.listener_fd) catch {
                 if (!self.running) break;
                 continue;
             };
-            self.handleConnection(conn.stream);
+            self.handleConnection(fd);
         }
     }
 
-    fn handleConnection(self: *Http1Server, stream: net.Stream) void {
-        defer stream.close();
+    fn handleConnection(self: *Http1Server, fd: sys.socket_t) void {
+        defer sys.close(fd);
 
         // TLS handshake
-        var tls_stream = tls.TlsStream.handshake(stream.handle, self.tls_config) catch |err| {
+        var tls_stream = tls.TlsStream.handshake(fd, self.tls_config) catch |err| {
             log.debug("TLS handshake failed: {any}", .{err});
             return;
         };
@@ -136,40 +146,42 @@ pub const Http1Server = struct {
         else
             relative;
 
-        // Open and serve the file
-        const dir = fs.cwd().openDir(self.static_dir, .{}) catch {
-            self.sendError(&tls_stream, "500 Internal Server Error", "Cannot open static directory");
+        // Compose full path: "{static_dir}/{file_path}"
+        var full_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&full_buf, "{s}/{s}", .{ self.static_dir, file_path }) catch {
+            self.sendError(&tls_stream, "500 Internal Server Error", "Path too long");
             return;
         };
-        const file = dir.openFile(file_path, .{}) catch {
-            // Try with /index.html appended (for directory paths)
+
+        const file = sys.openFileRead(full_path) catch {
+            // Try {relative}/index.html for directory paths
             if (relative.len > 0 and relative[relative.len - 1] != '/') {
-                var index_buf: [512]u8 = undefined;
-                const index_path = std.fmt.bufPrint(&index_buf, "{s}/index.html", .{relative}) catch {
+                var index_full_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const index_full = std.fmt.bufPrint(&index_full_buf, "{s}/{s}/index.html", .{ self.static_dir, relative }) catch {
                     self.sendError(&tls_stream, "404 Not Found", "Not found");
                     return;
                 };
-                const index_file = dir.openFile(index_path, .{}) catch {
+                const index_file = sys.openFileRead(index_full) catch {
                     self.sendError(&tls_stream, "404 Not Found", "Not found");
                     return;
                 };
-                self.serveFile(&tls_stream, index_file, index_path, std.mem.eql(u8, method, "HEAD"));
+                self.serveFile(&tls_stream, index_file, index_full, std.mem.eql(u8, method, "HEAD"));
                 return;
             }
             self.sendError(&tls_stream, "404 Not Found", "Not found");
             return;
         };
-        self.serveFile(&tls_stream, file, file_path, std.mem.eql(u8, method, "HEAD"));
+        self.serveFile(&tls_stream, file, full_path, std.mem.eql(u8, method, "HEAD"));
     }
 
-    fn serveFile(self: *Http1Server, tls_stream: *tls.TlsStream, file: fs.File, path: []const u8, head_only: bool) void {
+    fn serveFile(self: *Http1Server, tls_stream: *tls.TlsStream, file: sys.File, path: []const u8, head_only: bool) void {
         defer file.close();
 
-        const stat = file.stat() catch {
+        const st = file.stat() catch {
             self.sendError(tls_stream, "500 Internal Server Error", "Cannot stat file");
             return;
         };
-        const file_size = stat.size;
+        const file_size = st.size;
         const content_type = mimeType(path);
 
         // Write response header

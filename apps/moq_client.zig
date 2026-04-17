@@ -9,6 +9,8 @@
 
 const std = @import("std");
 const quic = @import("quic");
+const io_compat = @import("quic").io_compat;
+const sys = quic.sys;
 const event_loop = quic.event_loop;
 
 const moq_wire = quic.moq.wire;
@@ -76,7 +78,7 @@ const MoqClientHandler = struct {
         self.setRole(ctrl, .control);
 
         var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
+        var fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writeSetup(fbs.writer(), .{
             .implementation = "quic-zig/moq",
         }) catch return;
@@ -160,7 +162,7 @@ const MoqClientHandler = struct {
     }
 
     fn handleDataStream(self: *MoqClientHandler, stream_id: u64, data: []const u8) void {
-        var fbs = std.io.fixedBufferStream(data);
+        var fbs = io_compat.fixedBufferStream(data);
         const parsed = moq_obj.readSubgroupHeader(&fbs) catch {
             std.debug.print("[MoQ] Data stream {d}: {d} bytes (parse deferred)\n", .{ stream_id, data.len });
             return;
@@ -175,7 +177,7 @@ const MoqClientHandler = struct {
         const rest = data[fbs.pos..];
         var off: usize = 0;
         while (off < rest.len) {
-            var obj_fbs = std.io.fixedBufferStream(rest[off..]);
+            var obj_fbs = io_compat.fixedBufferStream(rest[off..]);
             const obj_reader = obj_fbs.reader();
             const obj_id = moq_wire.readVarInt(obj_reader) catch break;
             const payload_len = moq_wire.readVarInt(obj_reader) catch break;
@@ -201,7 +203,7 @@ const MoqClientHandler = struct {
             self.setRole(bidi, .request);
 
             var buf: [512]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&buf);
+            var fbs = io_compat.fixedBufferStream(&buf);
             moq_msg.writeSubscribe(fbs.writer(), .{
                 .track_namespace = ts.ns_parts,
                 .track_name = ts.name,
@@ -237,7 +239,7 @@ const MoqClientHandler = struct {
         self.published = true;
 
         var buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
+        var fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writePublish(fbs.writer(), .{
             .track_namespace = self.ns_parts,
             .track_name = self.track_name,
@@ -251,7 +253,7 @@ const MoqClientHandler = struct {
     pub fn onPollComplete(self: *MoqClientHandler, session: *event_loop.ClientSession) void {
         if (self.mode != .publish or !self.published) return;
 
-        const now: i128 = std.time.nanoTimestamp();
+        const now: i128 = sys.nanoTimestamp();
         if (self.last_tick_ns == 0) self.last_tick_ns = now;
         if (now - self.last_tick_ns < 1_000_000_000) return;
         self.last_tick_ns = now;
@@ -262,7 +264,7 @@ const MoqClientHandler = struct {
         const payload = std.fmt.bufPrint(&payload_buf, "pub tick {d}", .{self.group_id}) catch return;
 
         var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
+        var fbs = io_compat.fixedBufferStream(&buf);
         const w = fbs.writer();
         moq_obj.writeSubgroupHeader(w, .{
             .track_alias = 1,
@@ -283,7 +285,7 @@ const MoqClientHandler = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -299,7 +301,7 @@ pub fn main() !void {
     var track_names = std.ArrayList([]const u8){ .items = &.{}, .capacity = 0 };
     defer track_names.deinit(alloc);
 
-    var args = std.process.args();
+    var args = std.process.Args.Iterator.init(init.args);
     _ = args.next();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--addr")) {

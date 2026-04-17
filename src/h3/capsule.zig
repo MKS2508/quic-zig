@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const io = std.io;
+const io = @import("../io_compat.zig");
 const packet = @import("../quic/packet.zig");
 
 /// HTTP Capsule types (RFC 9297 Section 4.7).

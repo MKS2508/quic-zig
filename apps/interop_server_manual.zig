@@ -13,6 +13,8 @@ const std = @import("std");
 const posix = std.posix;
 
 const lib = @import("quic");
+const sys = lib.sys;
+const net = lib.net_compat;
 const connection = lib.connection;
 const connection_manager = lib.connection_manager;
 const quic_crypto = lib.crypto;
@@ -63,13 +65,13 @@ pub fn main() !void {
     const alloc = arena.allocator();
 
     // Read environment variables
-    const testcase_str = std.posix.getenv("TESTCASE") orelse "handshake";
+    const testcase_str = sys.getenv("TESTCASE") orelse "handshake";
     const testcase = parseTestCase(testcase_str);
-    const sslkeylogfile_path = std.posix.getenv("SSLKEYLOGFILE");
-    const qlog_dir = std.posix.getenv("QLOGDIR");
-    const www_dir = std.posix.getenv("WWW") orelse "/www";
-    const certs_dir = std.posix.getenv("CERTS") orelse "/certs";
-    const port_str = std.posix.getenv("PORT") orelse "443";
+    const sslkeylogfile_path = sys.getenv("SSLKEYLOGFILE");
+    const qlog_dir = sys.getenv("QLOGDIR");
+    const www_dir = sys.getenv("WWW") orelse "/www";
+    const certs_dir = sys.getenv("CERTS") orelse "/certs";
+    const port_str = sys.getenv("PORT") orelse "443";
 
     std.log.info("interop server: testcase={s}", .{testcase_str});
 
@@ -79,8 +81,8 @@ pub fn main() !void {
     }
 
     // Open SSLKEYLOGFILE if requested
-    const keylog_file: ?std.fs.File = if (sslkeylogfile_path) |path|
-        std.fs.cwd().createFile(path, .{}) catch null
+    const keylog_file: ?sys.File = if (sslkeylogfile_path) |path|
+        sys.createFile(path) catch null
     else
         null;
     defer if (keylog_file) |f| f.close();
@@ -112,13 +114,13 @@ pub fn main() !void {
     alpn[0] = if (use_h3) "h3" else "hq-interop";
 
     var ticket_key: [16]u8 = undefined;
-    std.crypto.random.bytes(&ticket_key);
+    sys.randomBytes(&ticket_key);
 
     var retry_token_key: [16]u8 = undefined;
-    std.crypto.random.bytes(&retry_token_key);
+    sys.randomBytes(&retry_token_key);
 
     var static_reset_key: [16]u8 = undefined;
-    std.crypto.random.bytes(&static_reset_key);
+    sys.randomBytes(&static_reset_key);
 
     const cipher_only: ?quic_crypto.CipherSuite = if (testcase == .chacha20) .chacha20_poly1305_sha256 else null;
 
@@ -135,13 +137,13 @@ pub fn main() !void {
     const listen_port: u16 = std.fmt.parseInt(u16, port_str, 10) catch 443;
     const sockfd, const local_addr = blk: {
         // Try IPv6 dual-stack socket first (handles both IPv4 and IPv6)
-        const addr6 = try std.net.Address.parseIp6("::", listen_port);
-        const fd6 = posix.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0) catch {
+        const addr6 = try net.Address.parseIp6("::", listen_port);
+        const fd6 = sys.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0) catch {
             // Fall back to IPv4-only
-            const addr4 = try std.net.Address.parseIp4("0.0.0.0", listen_port);
-            const fd4 = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-            posix.bind(fd4, &addr4.any, addr4.getOsSockLen()) catch {
-                posix.close(fd4);
+            const addr4 = try net.Address.parseIp4("0.0.0.0", listen_port);
+            const fd4 = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+            sys.bind(fd4, &addr4.any, addr4.getOsSockLen()) catch {
+                sys.close(fd4);
                 return error.BindFailed;
             };
             break :blk .{ fd4, addr4 };
@@ -150,20 +152,20 @@ pub fn main() !void {
         const IPV6_V6ONLY: u32 = if (@import("builtin").os.tag == .linux) 26 else 27;
         const zero: c_int = 0;
         posix.setsockopt(fd6, posix.IPPROTO.IPV6, IPV6_V6ONLY, std.mem.asBytes(&zero)) catch {};
-        posix.bind(fd6, &addr6.any, addr6.getOsSockLen()) catch {
-            posix.close(fd6);
+        sys.bind(fd6, &addr6.any, addr6.getOsSockLen()) catch {
+            sys.close(fd6);
             // Fall back to IPv4-only
-            const addr4 = try std.net.Address.parseIp4("0.0.0.0", listen_port);
-            const fd4 = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-            posix.bind(fd4, &addr4.any, addr4.getOsSockLen()) catch {
-                posix.close(fd4);
+            const addr4 = try net.Address.parseIp4("0.0.0.0", listen_port);
+            const fd4 = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+            sys.bind(fd4, &addr4.any, addr4.getOsSockLen()) catch {
+                sys.close(fd4);
                 return error.BindFailed;
             };
             break :blk .{ fd4, addr4 };
         };
         break :blk .{ fd6, addr6 };
     };
-    defer posix.close(sockfd);
+    defer sys.close(sockfd);
     ecn_socket.enableEcnRecv(sockfd) catch {};
     std.log.info("interop server listening on [::]:{d} (ALPN={s})", .{ listen_port, alpn[0] });
 
@@ -183,7 +185,7 @@ pub fn main() !void {
             }
             // Generate a CID for the preferred address
             pref.cid_len = 8;
-            std.crypto.random.bytes(pref.cid_buf[0..8]);
+            sys.randomBytes(pref.cid_buf[0..8]);
             // Generate stateless reset token for this CID
             const stateless_reset = lib.stateless_reset;
             pref.stateless_reset_token = stateless_reset.computeToken(static_reset_key, pref.cid_buf[0..8]);
@@ -246,11 +248,11 @@ pub fn main() !void {
                     if (bytes_written > 0) {
                         ecn_socket.setEcnMark(sockfd, entry.conn.getEcnMark()) catch {};
                         const send_addr = entry.conn.peerAddress();
-                        _ = posix.sendto(sockfd, out[0..bytes_written], 0, @ptrCast(send_addr), connection.sockaddrLen(send_addr)) catch {};
+                        _ = sys.sendto(sockfd, out[0..bytes_written], 0, @ptrCast(send_addr), connection.sockaddrLen(send_addr)) catch {};
                     }
                 },
                 .send_response => |data| {
-                    _ = posix.sendto(sockfd, data, 0, @ptrCast(&remote_addr), addr_size) catch {};
+                    _ = sys.sendto(sockfd, data, 0, @ptrCast(&remote_addr), addr_size) catch {};
                 },
                 .dropped => {},
             }
@@ -309,14 +311,14 @@ pub fn main() !void {
                 if (bytes_written == 0) break;
                 ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
                 const send_addr = conn.peerAddress();
-                _ = posix.sendto(sockfd, out[0..bytes_written], 0, @ptrCast(send_addr), connection.sockaddrLen(send_addr)) catch {};
+                _ = sys.sendto(sockfd, out[0..bytes_written], 0, @ptrCast(send_addr), connection.sockaddrLen(send_addr)) catch {};
             }
 
             i += 1;
         }
 
         // Only sleep when idle (no packets received and no sends happened)
-        if (packets_received == 0) std.Thread.sleep(200 * std.time.ns_per_us);
+        if (packets_received == 0) sys.sleepNs(200 * std.time.ns_per_us);
     }
 }
 
@@ -393,11 +395,11 @@ fn readFileFromWww(alloc: std.mem.Allocator, www_dir: []const u8, path: []const 
     @memcpy(full_path_buf[pos..][0..clean_path.len], clean_path);
     pos += clean_path.len;
 
-    return std.fs.cwd().readFileAlloc(alloc, full_path_buf[0..pos], 10 * 1024 * 1024);
+    return sys.readFileAlloc(alloc, full_path_buf[0..pos], 10 * 1024 * 1024);
 }
 
 fn loadFile(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.fs.cwd().readFileAlloc(alloc, path, 65536);
+    return sys.readFileAlloc(alloc, path, 65536);
 }
 
 /// Discover the server's non-loopback IPv4 and IPv6 addresses from network interfaces.

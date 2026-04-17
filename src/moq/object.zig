@@ -11,7 +11,7 @@
 // This module encodes/decodes headers only; payload bytes are opaque.
 
 const std = @import("std");
-const io = std.io;
+const io = @import("../io_compat.zig");
 const testing = std.testing;
 
 const wire = @import("wire.zig");

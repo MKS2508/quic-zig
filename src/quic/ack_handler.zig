@@ -139,7 +139,7 @@ pub const SentPacketTracker = struct {
     /// O(count) not O(capacity). Critical for detectLostPackets() which iterates
     /// on every ACK — with AutoHashMap, tombstone bloat after thousands of
     /// insert/remove cycles caused progressive latency degradation.
-    sent_packets: std.AutoArrayHashMap(u64, SentPacket),
+    sent_packets: std.AutoArrayHashMapUnmanaged(u64, SentPacket),
     largest_sent: ?u64 = null,
     largest_acked: ?u64 = null,
     loss_time: ?i64 = null,
@@ -154,12 +154,12 @@ pub const SentPacketTracker = struct {
     pub fn init(allocator: Allocator) SentPacketTracker {
         return .{
             .allocator = allocator,
-            .sent_packets = std.AutoArrayHashMap(u64, SentPacket).init(allocator),
+            .sent_packets = .{},
         };
     }
 
     pub fn deinit(self: *SentPacketTracker) void {
-        self.sent_packets.deinit();
+        self.sent_packets.deinit(self.allocator);
     }
 
     pub fn onPacketSent(self: *SentPacketTracker, pkt: SentPacket) !void {
@@ -170,7 +170,7 @@ pub const SentPacketTracker = struct {
             self.ack_eliciting_in_flight += 1;
             self.last_ack_eliciting_sent_time = pkt.time_sent;
         }
-        try self.sent_packets.put(pkt.pn, pkt);
+        try self.sent_packets.put(self.allocator, pkt.pn, pkt);
     }
 
     pub fn onAckReceived(

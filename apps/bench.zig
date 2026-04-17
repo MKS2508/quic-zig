@@ -1,10 +1,11 @@
 const std = @import("std");
 const posix = std.posix;
-const net = std.net;
+const net = @import("quic").net_compat;
 
 pub const std_options: std.Options = .{ .log_level = .err };
 
 const quic = @import("quic");
+const sys = quic.sys;
 const connection = quic.connection;
 const tls13 = quic.tls13;
 const ecn_socket = quic.ecn_socket;
@@ -52,12 +53,12 @@ fn sendAll(cs: *ConnState) void {
         const n = cs.conn.send(&cs.out) catch break;
         if (n == 0) break;
         ecn_socket.setEcnMark(cs.sockfd, cs.conn.getEcnMark()) catch {};
-        _ = posix.sendto(cs.sockfd, cs.out[0..n], 0, @ptrCast(&cs.remote_addr), cs.addr_size) catch break;
+        _ = sys.sendto(cs.sockfd, cs.out[0..n], 0, @ptrCast(&cs.remote_addr), cs.addr_size) catch break;
     }
 }
 
 fn timestamp() i64 {
-    return @intCast(std.time.nanoTimestamp());
+    return sys.nanoTimestamp();
 }
 
 fn doHandshake(cs: *ConnState) bool {
@@ -67,14 +68,14 @@ fn doHandshake(cs: *ConnState) bool {
         sendAll(cs);
         recvAll(cs);
         if (cs.conn.state == .connected) break;
-        std.Thread.sleep(200 * std.time.ns_per_us);
+        sys.sleepNs(200 * std.time.ns_per_us);
     }
     return cs.conn.state == .connected;
 }
 
 fn flushPostHandshake(cs: *ConnState) void {
     sendAll(cs);
-    std.Thread.sleep(1 * std.time.ns_per_ms);
+    sys.sleepNs(1 * std.time.ns_per_ms);
     recvAll(cs);
     cs.conn.onTimeout() catch {};
     sendAll(cs);
@@ -235,10 +236,10 @@ fn runBench(alloc: std.mem.Allocator, config: BenchConfig) !void {
             .skip_cert_verify = true,
         };
 
-        const sockfd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-        defer posix.close(sockfd);
+        const sockfd = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+        defer sys.close(sockfd);
         const local_addr = try net.Address.parseIp4("127.0.0.1", 0);
-        try posix.bind(sockfd, &local_addr.any, local_addr.getOsSockLen());
+        try sys.bind(sockfd, &local_addr.any, local_addr.getOsSockLen());
         ecn_socket.enableEcnRecv(sockfd) catch {};
 
         var cs = ConnState{
@@ -258,7 +259,7 @@ fn runBench(alloc: std.mem.Allocator, config: BenchConfig) !void {
         // Wait for NewSessionTicket
         var ticket_wait: usize = 0;
         while (cs.conn.session_ticket == null and ticket_wait < 50) : (ticket_wait += 1) {
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            sys.sleepNs(1 * std.time.ns_per_ms);
             recvAll(&cs);
             cs.conn.onTimeout() catch {};
             sendAll(&cs);
@@ -273,7 +274,7 @@ fn runBench(alloc: std.mem.Allocator, config: BenchConfig) !void {
 
         cs.conn.close(0, "warmup done");
         sendAll(&cs);
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        sys.sleepNs(5 * std.time.ns_per_ms);
     }
 
     // === Main benchmark ===
@@ -281,10 +282,10 @@ fn runBench(alloc: std.mem.Allocator, config: BenchConfig) !void {
 
     var conn_idx: u32 = 0;
     while (conn_idx < config.num_connections) : (conn_idx += 1) {
-        const sockfd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-        defer posix.close(sockfd);
+        const sockfd = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+        defer sys.close(sockfd);
         const local_addr = try net.Address.parseIp4("127.0.0.1", 0);
-        try posix.bind(sockfd, &local_addr.any, local_addr.getOsSockLen());
+        try sys.bind(sockfd, &local_addr.any, local_addr.getOsSockLen());
         ecn_socket.enableEcnRecv(sockfd) catch {};
 
         const tls_config: tls13.TlsConfig = .{
@@ -319,7 +320,7 @@ fn runBench(alloc: std.mem.Allocator, config: BenchConfig) !void {
         if (config.zerortt) {
             var ticket_wait: usize = 0;
             while (cs.conn.session_ticket == null and ticket_wait < 20) : (ticket_wait += 1) {
-                std.Thread.sleep(1 * std.time.ns_per_ms);
+                sys.sleepNs(1 * std.time.ns_per_ms);
                 recvAll(&cs);
                 cs.conn.onTimeout() catch {};
                 sendAll(&cs);
@@ -334,7 +335,7 @@ fn runBench(alloc: std.mem.Allocator, config: BenchConfig) !void {
         defer h3_conn.deinit();
         h3_conn.initConnection() catch continue;
         sendAll(&cs);
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        sys.sleepNs(1 * std.time.ns_per_ms);
         recvAll(&cs);
         cs.conn.onTimeout() catch {};
         sendAll(&cs);
@@ -359,14 +360,14 @@ fn runBench(alloc: std.mem.Allocator, config: BenchConfig) !void {
     );
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     var config = BenchConfig{};
 
-    var args = std.process.args();
+    var args = std.process.Args.Iterator.init(init.args);
     _ = args.next();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {

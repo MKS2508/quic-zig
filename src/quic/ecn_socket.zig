@@ -1,4 +1,6 @@
 const std = @import("std");
+const sys = @import("../sys.zig");
+const net = @import("../net_compat.zig");
 const posix = std.posix;
 const builtin = @import("builtin");
 
@@ -106,7 +108,7 @@ pub fn recvmsgEcn(sockfd: posix.socket_t, buf: []u8) !RecvResult {
         // Windows fallback: plain recvfrom, no ECN info.
         var from_addr: posix.sockaddr.storage = std.mem.zeroes(posix.sockaddr.storage);
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
-        const bytes_read = try posix.recvfrom(sockfd, buf, 0, @ptrCast(&from_addr), &addr_len);
+        const bytes_read = try sys.recvfrom(sockfd, buf, 0, @ptrCast(&from_addr), &addr_len);
         return .{
             .bytes_read = bytes_read,
             .from_addr = from_addr,
@@ -298,22 +300,22 @@ pub fn sendDirect(sockfd: posix.socket_t, data: []const u8, addr: *const posix.s
 // Tests — ECN ancillary data tests only run on POSIX platforms.
 test "enableEcnRecv on a real socket" {
     if (comptime is_windows) return error.SkipZigTest;
-    const sockfd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-    defer posix.close(sockfd);
+    const sockfd = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+    defer sys.close(sockfd);
 
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 0);
-    try posix.bind(sockfd, &addr.any, addr.getOsSockLen());
+    const addr = try net.Address.parseIp4("127.0.0.1", 0);
+    try sys.bind(sockfd, &addr.any, addr.getOsSockLen());
 
     try enableEcnRecv(sockfd);
 }
 
 test "setEcnMark on a real socket" {
     if (comptime is_windows) return error.SkipZigTest;
-    const sockfd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-    defer posix.close(sockfd);
+    const sockfd = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+    defer sys.close(sockfd);
 
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 0);
-    try posix.bind(sockfd, &addr.any, addr.getOsSockLen());
+    const addr = try net.Address.parseIp4("127.0.0.1", 0);
+    try sys.bind(sockfd, &addr.any, addr.getOsSockLen());
 
     // ECT(0) = 0b10 = 2
     try setEcnMark(sockfd, 0b10);
@@ -323,11 +325,11 @@ test "setEcnMark on a real socket" {
 
 test "recvmsgEcn returns WouldBlock on empty socket" {
     if (comptime is_windows) return error.SkipZigTest;
-    const sockfd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-    defer posix.close(sockfd);
+    const sockfd = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+    defer sys.close(sockfd);
 
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 0);
-    try posix.bind(sockfd, &addr.any, addr.getOsSockLen());
+    const addr = try net.Address.parseIp4("127.0.0.1", 0);
+    try sys.bind(sockfd, &addr.any, addr.getOsSockLen());
     try enableEcnRecv(sockfd);
 
     var buf: [1500]u8 = undefined;

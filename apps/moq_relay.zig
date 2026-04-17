@@ -13,6 +13,8 @@
 
 const std = @import("std");
 const quic = @import("quic");
+const io_compat = @import("quic").io_compat;
+const sys = quic.sys;
 const event_loop = quic.event_loop;
 const tls13 = quic.tls13;
 const connection_mod = quic.connection;
@@ -224,7 +226,7 @@ const RelayHandler = struct {
             self.clients[ci].control_out = ctrl.stream_id;
 
             var setup_buf: [256]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&setup_buf);
+            var fbs = io_compat.fixedBufferStream(&setup_buf);
             moq_msg.writeSetup(fbs.writer(), .{
                 .implementation = "quic-zig/moq-relay",
             }) catch return;
@@ -259,7 +261,7 @@ const RelayHandler = struct {
 
     fn handleSubscribeNamespace(self: *RelayHandler, ci: usize, stream_id: u64, payload: []const u8) void {
         // Parse prefix tuple from payload.
-        var fbs = std.io.fixedBufferStream(payload);
+        var fbs = io_compat.fixedBufferStream(payload);
         const reader = fbs.reader();
         // request_id + delta (draft-17 request messages start with these).
         _ = moq_wire.readVarInt(reader) catch return; // request_id
@@ -281,7 +283,7 @@ const RelayHandler = struct {
 
         // Reply REQUEST_OK on the same bidi stream.
         var buf: [64]u8 = undefined;
-        var ok_fbs = std.io.fixedBufferStream(&buf);
+        var ok_fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writeRequestOk(ok_fbs.writer(), .{}) catch return;
         stream.send.writeData(buf[0..ok_fbs.pos]) catch return;
 
@@ -315,7 +317,7 @@ const RelayHandler = struct {
         const stream = conn.streams.getStream(stream_id) orelse return;
 
         var buf: [512]u8 = undefined;
-        var ns_fbs = std.io.fixedBufferStream(&buf);
+        var ns_fbs = io_compat.fixedBufferStream(&buf);
         try moq_msg.writeNamespace(ns_fbs.writer(), .{ .track_namespace = parts_buf[0..n_parts] });
         try stream.send.writeData(buf[0..ns_fbs.pos]);
     }
@@ -328,7 +330,7 @@ const RelayHandler = struct {
         const stream = conn.streams.getStream(stream_id) orelse return;
 
         var buf: [64]u8 = undefined;
-        var ok_fbs = std.io.fixedBufferStream(&buf);
+        var ok_fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writeRequestOk(ok_fbs.writer(), .{}) catch return;
         stream.send.writeData(buf[0..ok_fbs.pos]) catch return;
         std.debug.print("[relay] sent REQUEST_OK for publish_namespace\n", .{});
@@ -372,7 +374,7 @@ const RelayHandler = struct {
             const conn = self.clients[ci].conn orelse return;
             const stream = conn.streams.getStream(stream_id) orelse return;
             var buf: [256]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&buf);
+            var fbs = io_compat.fixedBufferStream(&buf);
             moq_msg.writeSubscribeOk(fbs.writer(), .{ .track_alias = alias }) catch return;
             stream.send.writeData(buf[0..fbs.pos]) catch return;
 
@@ -401,7 +403,7 @@ const RelayHandler = struct {
         const payload = std.fmt.bufPrint(&payload_buf, "tick {d} (track {d})", .{ self.group_id, ti }) catch return;
 
         var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
+        var fbs = io_compat.fixedBufferStream(&buf);
         const w = fbs.writer();
         moq_obj.writeSubgroupHeader(w, .{
             .track_alias = sub_alias,
@@ -450,7 +452,7 @@ const RelayHandler = struct {
         const conn = self.clients[ci].conn orelse return;
         const stream = conn.streams.getStream(stream_id) orelse return;
         var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
+        var fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writePublishOk(fbs.writer(), .{}) catch return;
         stream.send.writeData(buf[0..fbs.pos]) catch return;
 
@@ -459,7 +461,7 @@ const RelayHandler = struct {
 
     fn handleDataStream(self: *RelayHandler, ci: usize, _: u64, data: []const u8) void {
         // Parse subgroup header to get track_alias → find track → fan out to subscribers.
-        var fbs = std.io.fixedBufferStream(data);
+        var fbs = io_compat.fixedBufferStream(data);
         const parsed = moq_obj.readSubgroupHeader(&fbs) catch return;
         const h = parsed.header;
 
@@ -488,7 +490,7 @@ const RelayHandler = struct {
 
             // Rewrite the subgroup header with the subscriber's alias.
             var out_buf: [512]u8 = undefined;
-            var out_fbs = std.io.fixedBufferStream(&out_buf);
+            var out_fbs = io_compat.fixedBufferStream(&out_buf);
             const w = out_fbs.writer();
 
             moq_obj.writeSubgroupHeader(w, .{
@@ -528,7 +530,7 @@ const RelayHandler = struct {
                 });
 
                 var buf: [128]u8 = undefined;
-                var fbs = std.io.fixedBufferStream(&buf);
+                var fbs = io_compat.fixedBufferStream(&buf);
                 moq_msg.writePublishDone(fbs.writer(), .{
                     .status_code = 1, // producer disconnected
                     .reason = "publisher disconnected",
@@ -574,7 +576,7 @@ const RelayHandler = struct {
         const payload = std.fmt.bufPrint(&payload_buf, "tick {d}", .{group_id}) catch return;
 
         var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
+        var fbs = io_compat.fixedBufferStream(&buf);
         const w = fbs.writer();
         moq_obj.writeSubgroupHeader(w, .{
             .track_alias = sub_alias,
@@ -614,7 +616,7 @@ const RelayHandler = struct {
         }
         if (!has_subs) return;
 
-        const now: i128 = std.time.nanoTimestamp();
+        const now: i128 = sys.nanoTimestamp();
         if (self.last_tick_ns == 0) self.last_tick_ns = now;
         if (now - self.last_tick_ns < 1_000_000_000) return;
         self.last_tick_ns = now;
@@ -629,7 +631,7 @@ const RelayHandler = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -638,7 +640,7 @@ pub fn main() !void {
     var cert_path: []const u8 = "interop/certs/server.crt";
     var key_path: []const u8 = "interop/certs/server.key";
 
-    var args = std.process.args();
+    var args = std.process.Args.Iterator.init(init.args);
     _ = args.next();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
@@ -651,8 +653,8 @@ pub fn main() !void {
     }
 
     // Build TLS config with moqt-17 ALPN.
-    const server_cert_pem = try std.fs.cwd().readFileAlloc(alloc, cert_path, 8192);
-    const server_key_pem = try std.fs.cwd().readFileAlloc(alloc, key_path, 8192);
+    const server_cert_pem = try sys.readFileAlloc(alloc, cert_path, 8192);
+    const server_key_pem = try sys.readFileAlloc(alloc, key_path, 8192);
     const cert_chain = try tls13.parsePemCertChain(alloc, server_cert_pem);
     var key_der_buf: [4096]u8 = undefined;
     const key_der = try tls13.parsePemPrivateKey(server_key_pem, &key_der_buf);
@@ -663,7 +665,7 @@ pub fn main() !void {
     alpn[0] = moq_version.ALPN;
 
     var ticket_key: [16]u8 = undefined;
-    std.crypto.random.bytes(&ticket_key);
+    sys.randomBytes(&ticket_key);
 
     std.debug.print("\n=== MoQ Relay (draft-17) ===\n", .{});
     std.debug.print("Listening on 0.0.0.0:{d}  ALPN: {s}\n\n", .{ port, moq_version.ALPN });

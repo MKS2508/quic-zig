@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
-const io = std.io;
+const io = @import("../io_compat.zig");
 
 const packet_mod = @import("packet.zig");
 const crypto_mod = @import("crypto.zig");

@@ -3,6 +3,9 @@ const posix = std.posix;
 const builtin = @import("builtin");
 const log = std.log.scoped(.event_loop);
 const xev_mod = @import("xev");
+const sys = @import("sys.zig");
+const net = @import("net_compat.zig");
+const io_compat = @import("io_compat.zig");
 
 // Default backend: epoll on Linux, kqueue on macOS.
 // io_uring init fails in some containers used by the interop runner.
@@ -329,8 +332,8 @@ pub fn Server(comptime Handler: type) type {
             // Determine TLS config: use advanced or build from cert/key paths
             const tls_config: tls13.TlsConfig = if (config.tls_config) |tc| tc else blk: {
                 // Read cert files
-                const server_cert_pem = try std.fs.cwd().readFileAlloc(alloc, config.cert_path, 8192);
-                const server_key_pem = try std.fs.cwd().readFileAlloc(alloc, config.key_path, 8192);
+                const server_cert_pem = try sys.readFileAlloc(alloc, config.cert_path, 8192);
+                const server_key_pem = try sys.readFileAlloc(alloc, config.key_path, 8192);
 
                 // Parse PEM -> DER (supports certificate chains, e.g. Let's Encrypt fullchain.pem)
                 const cert_chain = try tls13.parsePemCertChain(alloc, server_cert_pem);
@@ -344,7 +347,7 @@ pub fn Server(comptime Handler: type) type {
                 alpn[0] = "h3";
 
                 var ticket_key: [16]u8 = undefined;
-                std.crypto.random.bytes(&ticket_key);
+                sys.randomBytes(&ticket_key);
 
                 break :blk .{
                     .cert_chain_der = cert_chain,
@@ -355,10 +358,10 @@ pub fn Server(comptime Handler: type) type {
             };
 
             var retry_token_key: [16]u8 = if (config.retry_token_key) |k| k else undefined;
-            if (config.retry_token_key == null) std.crypto.random.bytes(&retry_token_key);
+            if (config.retry_token_key == null) sys.randomBytes(&retry_token_key);
 
             var static_reset_key: [16]u8 = if (config.static_reset_key) |k| k else undefined;
-            if (config.static_reset_key == null) std.crypto.random.bytes(&static_reset_key);
+            if (config.static_reset_key == null) sys.randomBytes(&static_reset_key);
 
             // Connection config
             const conn_config: connection.ConnectionConfig = if (config.conn_config) |cc| cc else blk: {
@@ -372,23 +375,23 @@ pub fn Server(comptime Handler: type) type {
             // Create UDP socket
             const sockfd, const local_addr = if (config.ipv6) blk: {
                 // IPv6 dual-stack socket (handles both IPv4 and IPv6)
-                const addr6 = try std.net.Address.parseIp6("::", config.port);
-                const fd6 = try posix.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-                errdefer posix.close(fd6);
+                const addr6 = try net.Address.parseIp6("::", config.port);
+                const fd6 = try sys.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+                errdefer sys.close(fd6);
                 // Allow dual-stack (disable IPV6_V6ONLY)
                 const IPV6_V6ONLY: u32 = if (@import("builtin").os.tag == .linux) 26 else 27;
                 const zero_val: c_int = 0;
                 posix.setsockopt(fd6, posix.IPPROTO.IPV6, IPV6_V6ONLY, std.mem.asBytes(&zero_val)) catch {};
                 posix.setsockopt(fd6, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1))) catch {};
-                try posix.bind(fd6, &addr6.any, addr6.getOsSockLen());
+                try sys.bind(fd6, &addr6.any, addr6.getOsSockLen());
                 break :blk .{ fd6, addr6 };
             } else blk: {
                 // IPv4 socket
-                const addr4 = try std.net.Address.parseIp4(config.address, config.port);
-                const fd4 = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-                errdefer posix.close(fd4);
+                const addr4 = try net.Address.parseIp4(config.address, config.port);
+                const fd4 = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+                errdefer sys.close(fd4);
                 posix.setsockopt(fd4, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1))) catch {};
-                try posix.bind(fd4, &addr4.any, addr4.getOsSockLen());
+                try sys.bind(fd4, &addr4.any, addr4.getOsSockLen());
                 break :blk .{ fd4, addr4 };
             };
             ecn_socket.enableEcnRecv(sockfd) catch {};
@@ -396,21 +399,21 @@ pub fn Server(comptime Handler: type) type {
             // Optional second socket for preferred_address (connectionmigration)
             const preferred: ?PreferredSocket = if (config.preferred_port) |pp| blk: {
                 const pfd, const paddr = if (config.ipv6) v6: {
-                    const a6 = try std.net.Address.parseIp6("::", pp);
-                    const fd = try posix.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-                    errdefer posix.close(fd);
+                    const a6 = try net.Address.parseIp6("::", pp);
+                    const fd = try sys.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+                    errdefer sys.close(fd);
                     const IPV6_V6ONLY2: u32 = if (@import("builtin").os.tag == .linux) 26 else 27;
                     const zero2: c_int = 0;
                     posix.setsockopt(fd, posix.IPPROTO.IPV6, IPV6_V6ONLY2, std.mem.asBytes(&zero2)) catch {};
                     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1))) catch {};
-                    try posix.bind(fd, &a6.any, a6.getOsSockLen());
+                    try sys.bind(fd, &a6.any, a6.getOsSockLen());
                     break :v6 .{ fd, a6 };
                 } else v4: {
-                    const a4 = try std.net.Address.parseIp4(config.address, pp);
-                    const fd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-                    errdefer posix.close(fd);
+                    const a4 = try net.Address.parseIp4(config.address, pp);
+                    const fd = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+                    errdefer sys.close(fd);
                     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1))) catch {};
-                    try posix.bind(fd, &a4.any, a4.getOsSockLen());
+                    try sys.bind(fd, &a4.any, a4.getOsSockLen());
                     break :v4 .{ fd, a4 };
                 };
                 ecn_socket.enableEcnRecv(pfd) catch {};
@@ -484,8 +487,8 @@ pub fn Server(comptime Handler: type) type {
             }
             self.timer.deinit();
             self.loop.deinit();
-            posix.close(self.sockfd);
-            if (self.preferred) |p| posix.close(p.sockfd);
+            sys.close(self.sockfd);
+            if (self.preferred) |p| sys.close(p.sockfd);
             self.conn_mgr.deinit();
         }
 
@@ -740,7 +743,7 @@ pub fn Server(comptime Handler: type) type {
             var wtc = &(entry.wt_conn orelse return);
 
             // Parse WT quarter_stream_id prefix inline
-            var fbs = std.io.fixedBufferStream(data);
+            var fbs = io_compat.fixedBufferStream(data);
             const reader = fbs.reader();
             const quarter_id = packet.readVarInt(reader) catch return;
             const session_id = quarter_id * 4;
@@ -1002,7 +1005,7 @@ pub fn Server(comptime Handler: type) type {
                         // Check if there are more expired timeouts
                         const next = entry.conn.nextTimeoutNs();
                         if (next == null) break;
-                        const now_ns: i64 = @intCast(std.time.nanoTimestamp());
+                        const now_ns: i64 = sys.nanoTimestamp();
                         if (next.? > now_ns) break;
                     }
                 }
@@ -1089,7 +1092,7 @@ pub fn Server(comptime Handler: type) type {
         }
 
         fn computeNextTimeoutMs(self: *Self) ?u64 {
-            const now: i64 = @intCast(std.time.nanoTimestamp());
+            const now: i64 = sys.nanoTimestamp();
             var earliest: ?i64 = null;
 
             for (self.conn_mgr.entries.items) |entry| {
@@ -1433,12 +1436,14 @@ pub fn Client(comptime Handler: type) type {
                     .quic, .h0 => "h3", // default; override via config.alpn for custom protocols
                 };
 
-                var ca_bundle: ?*Certificate.Bundle = null;
+                const ca_bundle: ?*Certificate.Bundle = null;
                 if (config.ca_cert_path) |ca_path| {
-                    const bundle_ptr = try alloc.create(Certificate.Bundle);
-                    bundle_ptr.* = .{};
-                    try bundle_ptr.addCertsFromFilePath(alloc, std.fs.cwd(), ca_path);
-                    ca_bundle = bundle_ptr;
+                    _ = ca_path;
+                    // TODO(zig-0.16): Certificate.Bundle.addCertsFromFilePath now
+                    // requires an Io instance and Io.Dir — needs an Io threaded
+                    // through the event_loop Config. Skipped for Phase 2 since
+                    // skip_cert_verify covers the interop test paths.
+                    log.warn("ca_cert_path ignored: pending 0.16 Io threading", .{});
                 }
 
                 break :blk .{
@@ -1478,31 +1483,31 @@ pub fn Client(comptime Handler: type) type {
 
             // Resolve remote address
             const remote_addr = if (config.ipv6) blk: {
-                const addr6 = try std.net.Address.parseIp6(config.address, config.port);
+                const addr6 = try net.Address.parseIp6(config.address, config.port);
                 break :blk connection.sockaddrToStorage(&addr6.any);
             } else blk: {
-                const addr4 = try std.net.Address.parseIp4(config.address, config.port);
+                const addr4 = try net.Address.parseIp4(config.address, config.port);
                 break :blk connection.sockaddrToStorage(&addr4.any);
             };
 
             // Create non-blocking UDP socket, bind to ephemeral port
             const sockfd, const local_addr = if (config.ipv6) blk: {
-                const addr6 = try std.net.Address.parseIp6("::", 0);
-                const fd = try posix.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-                errdefer posix.close(fd);
+                const addr6 = try net.Address.parseIp6("::", 0);
+                const fd = try sys.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+                errdefer sys.close(fd);
                 const IPV6_V6ONLY: u32 = if (@import("builtin").os.tag == .linux) 26 else 27;
                 const zero_val: c_int = 0;
                 posix.setsockopt(fd, posix.IPPROTO.IPV6, IPV6_V6ONLY, std.mem.asBytes(&zero_val)) catch {};
-                try posix.bind(fd, &addr6.any, addr6.getOsSockLen());
+                try sys.bind(fd, &addr6.any, addr6.getOsSockLen());
                 break :blk .{ fd, addr6 };
             } else blk: {
-                const addr4 = try std.net.Address.parseIp4("0.0.0.0", 0);
-                const fd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-                errdefer posix.close(fd);
-                try posix.bind(fd, &addr4.any, addr4.getOsSockLen());
+                const addr4 = try net.Address.parseIp4("0.0.0.0", 0);
+                const fd = try sys.socket(posix.AF.INET, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+                errdefer sys.close(fd);
+                try sys.bind(fd, &addr4.any, addr4.getOsSockLen());
                 break :blk .{ fd, addr4 };
             };
-            errdefer posix.close(sockfd);
+            errdefer sys.close(sockfd);
             ecn_socket.enableEcnRecv(sockfd) catch {};
 
             // Init libxev
@@ -1545,7 +1550,7 @@ pub fn Client(comptime Handler: type) type {
             self.finished_streams.deinit();
             self.timer.deinit();
             self.loop.deinit();
-            posix.close(self.sockfd);
+            sys.close(self.sockfd);
             self.conn.deinit();
             self.allocator.destroy(self.conn);
         }
@@ -1914,7 +1919,7 @@ pub fn Client(comptime Handler: type) type {
                     if (conn.isClosed()) break;
                     const next = conn.nextTimeoutNs();
                     if (next == null) break;
-                    const now_ns: i64 = @intCast(std.time.nanoTimestamp());
+                    const now_ns: i64 = sys.nanoTimestamp();
                     if (next.? > now_ns) break;
                 }
             }
@@ -1973,7 +1978,7 @@ pub fn Client(comptime Handler: type) type {
 
         fn computeNextTimeoutMs(self: *Self) ?u64 {
             const deadline = self.conn.nextTimeoutNs() orelse return null;
-            const now: i64 = @intCast(std.time.nanoTimestamp());
+            const now: i64 = sys.nanoTimestamp();
             const delta_ns = deadline - now;
             if (delta_ns <= 0) return 1;
             const ms: u64 = @intCast(@divFloor(delta_ns, 1_000_000));

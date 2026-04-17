@@ -5,6 +5,8 @@
 // X.509 certificate chain validation via std.crypto.Certificate.
 
 const std = @import("std");
+const sys = @import("../sys.zig");
+const io = @import("../io_compat.zig");
 const crypto = std.crypto;
 const quic_crypto = @import("crypto.zig");
 const protocol = @import("protocol.zig");
@@ -494,7 +496,7 @@ pub const SessionTicket = struct {
     }
 
     pub fn isExpired(self: *const SessionTicket) bool {
-        const now_sec = std.time.timestamp();
+        const now_sec = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
         return (now_sec - self.creation_time) > @as(i64, self.lifetime);
     }
 };
@@ -510,7 +512,7 @@ pub const TlsConfig = struct {
     ca_bundle: ?*Certificate.Bundle = null, // Caller-owned CA bundle for trust anchor verification
     session_ticket: ?*const SessionTicket = null, // Stored ticket from previous connection (client)
     ticket_key: ?[16]u8 = null, // AES-128-GCM key for encrypting/decrypting tickets (server)
-    keylog_file: ?std.fs.File = null, // SSLKEYLOGFILE output (NSS Key Log format)
+    keylog_file: ?@import("../sys.zig").File = null, // SSLKEYLOGFILE output (NSS Key Log format)
     cipher_suite_only: ?quic_crypto.CipherSuite = null, // If set, offer ONLY this cipher suite
     quic_version: u32 = protocol.QUIC_V1, // QUIC version (affects HKDF labels)
 };
@@ -522,7 +524,7 @@ fn hexByte(b: u8) [2]u8 {
     return .{ hex[b >> 4], hex[b & 0x0f] };
 }
 
-fn writeKeylogLine(file: std.fs.File, label: []const u8, client_random: *const [32]u8, secret: *const [32]u8) void {
+fn writeKeylogLine(file: @import("../sys.zig").File, label: []const u8, client_random: *const [32]u8, secret: *const [32]u8) void {
     // Format: "LABEL <client_random_hex> <secret_hex>\n"
     var buf: [256]u8 = undefined;
     var pos: usize = 0;
@@ -550,7 +552,7 @@ fn writeKeylogLine(file: std.fs.File, label: []const u8, client_random: *const [
     buf[pos] = '\n';
     pos += 1;
 
-    _ = file.write(buf[0..pos]) catch {};
+    file.writeAll(buf[0..pos]) catch {};
 }
 
 // ─── Handshake state machine ─────────────────────────────────────────
@@ -714,22 +716,22 @@ pub const Tls13Handshake = struct {
         self.peer_session_id = .{0} ** 32;
 
         // Pre-encode transport params to avoid dangling slices after struct move
-        var tp_fbs = std.io.fixedBufferStream(&self.tp_encoded);
+        var tp_fbs = io.fixedBufferStream(&self.tp_encoded);
         local_tp.encode(tp_fbs.writer()) catch {};
         self.tp_encoded_len = tp_fbs.pos;
 
         // Generate X25519 key pair
-        crypto.random.bytes(&self.x25519_secret);
+        sys.randomBytes(&self.x25519_secret);
         self.x25519_public = X25519.recoverPublicKey(self.x25519_secret) catch blk: {
             // If key is bad (unlikely), regenerate
-            crypto.random.bytes(&self.x25519_secret);
+            sys.randomBytes(&self.x25519_secret);
             break :blk X25519.recoverPublicKey(self.x25519_secret) catch unreachable;
         };
 
         // Generate P-256 key pair (offered alongside X25519 in ClientHello)
-        crypto.random.bytes(&self.p256_secret);
+        sys.randomBytes(&self.p256_secret);
         self.p256_public = (P256.basePoint.mulPublic(self.p256_secret, .big) catch blk: {
-            crypto.random.bytes(&self.p256_secret);
+            sys.randomBytes(&self.p256_secret);
             break :blk P256.basePoint.mulPublic(self.p256_secret, .big) catch unreachable;
         }).toUncompressedSec1();
         self.negotiated_group = GROUP_X25519;
@@ -767,14 +769,14 @@ pub const Tls13Handshake = struct {
         self.peer_session_id = .{0} ** 32;
 
         // Pre-encode transport params to avoid dangling slices after struct move
-        var tp_fbs = std.io.fixedBufferStream(&self.tp_encoded);
+        var tp_fbs = io.fixedBufferStream(&self.tp_encoded);
         local_tp.encode(tp_fbs.writer()) catch {};
         self.tp_encoded_len = tp_fbs.pos;
 
         // Generate X25519 key pair
-        crypto.random.bytes(&self.x25519_secret);
+        sys.randomBytes(&self.x25519_secret);
         self.x25519_public = X25519.recoverPublicKey(self.x25519_secret) catch blk: {
-            crypto.random.bytes(&self.x25519_secret);
+            sys.randomBytes(&self.x25519_secret);
             break :blk X25519.recoverPublicKey(self.x25519_secret) catch unreachable;
         };
         self.negotiated_group = GROUP_X25519;
@@ -906,7 +908,7 @@ pub const Tls13Handshake = struct {
     // ─── Client states ───────────────────────────────────────────────
 
     fn clientBuildHello(self: *Tls13Handshake) !Action {
-        crypto.random.bytes(&self.client_random);
+        sys.randomBytes(&self.client_random);
 
         var buf: [4096]u8 = undefined;
         const msg = buildClientHello(
@@ -1127,7 +1129,7 @@ pub const Tls13Handshake = struct {
 
                 // Chain validation: verify each cert against its issuer
                 if (prev_parsed) |prev| {
-                    const now_sec = std.time.timestamp();
+                    const now_sec = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
                     prev.verify(parsed, now_sec) catch return error.BadCertificate;
 
                     // RFC 5280 §4.2.1.9: issuer cert must have basicConstraints CA:TRUE
@@ -1149,7 +1151,7 @@ pub const Tls13Handshake = struct {
                 // If this is the last cert, verify against CA bundle
                 if (pos >= cert_list_end) {
                     if (self.config.ca_bundle) |bundle| {
-                        const now_sec = std.time.timestamp();
+                        const now_sec = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
                         bundle.verify(parsed, now_sec) catch return error.BadCertificate;
                     }
                 }
@@ -1459,7 +1461,7 @@ pub const Tls13Handshake = struct {
                     // Update our version_information to reflect the chosen version
                     self.local_transport_params.version_info_chosen = protocol.QUIC_V2;
                     // Re-encode transport params so EncryptedExtensions carries the updated chosen_version
-                    var tp_fbs = std.io.fixedBufferStream(&self.tp_encoded);
+                    var tp_fbs = io.fixedBufferStream(&self.tp_encoded);
                     self.local_transport_params.encode(tp_fbs.writer()) catch {};
                     self.tp_encoded_len = tp_fbs.pos;
                 }
@@ -1471,13 +1473,13 @@ pub const Tls13Handshake = struct {
     }
 
     fn serverBuildServerHello(self: *Tls13Handshake) !Action {
-        crypto.random.bytes(&self.server_random);
+        sys.randomBytes(&self.server_random);
 
         // Prepare key share based on negotiated group
         var ks_data_buf: [65]u8 = undefined;
         const ks_data: []const u8 = if (self.negotiated_group == GROUP_SECP256R1) blk: {
             // Generate P-256 ephemeral key pair
-            crypto.random.bytes(&self.p256_secret);
+            sys.randomBytes(&self.p256_secret);
             self.p256_public = (P256.basePoint.mulPublic(self.p256_secret, .big) catch return error.KeyScheduleError).toUncompressedSec1();
             @memcpy(&ks_data_buf, &self.p256_public);
             break :blk ks_data_buf[0..65];
@@ -1695,13 +1697,13 @@ pub const Tls13Handshake = struct {
 
         // Generate random ticket_age_add
         var ticket_age_add_bytes: [4]u8 = undefined;
-        crypto.random.bytes(&ticket_age_add_bytes);
+        sys.randomBytes(&ticket_age_add_bytes);
         const ticket_age_add = std.mem.readInt(u32, &ticket_age_add_bytes, .big);
 
         // Build ticket plaintext: psk(32) || creation_time(8) || alpn_len(1) || alpn
         var ticket_plain: [64]u8 = .{0} ** 64;
         @memcpy(ticket_plain[0..32], &psk);
-        const now_sec = std.time.timestamp();
+        const now_sec = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
         std.mem.writeInt(i64, ticket_plain[32..40], now_sec, .big);
         const alpn_bytes = if (self.config.alpn.len > 0) self.config.alpn[0] else "";
         const alpn_copy_len: u8 = @intCast(@min(alpn_bytes.len, 16));
@@ -1953,7 +1955,7 @@ pub const Tls13Handshake = struct {
         var ticket: SessionTicket = .{ .psk = psk };
         ticket.lifetime = lifetime;
         ticket.ticket_age_add = ticket_age_add;
-        ticket.creation_time = std.time.timestamp();
+        ticket.creation_time = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
         ticket.max_early_data_size = max_early_data;
 
         const copy_len: u16 = @intCast(@min(ticket_data.len, ticket.ticket.len));
@@ -2199,7 +2201,7 @@ fn buildClientHello(
         // pre_shared_key extension (type=41) - MUST be last
         const ticket_bytes = ticket.getTicket();
         const obfuscated_age: u32 = blk: {
-            const now_sec = std.time.timestamp();
+            const now_sec = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
             const age_ms: u32 = @intCast(@as(u64, @intCast(@max(0, now_sec - ticket.creation_time))) * 1000);
             break :blk age_ms +% ticket.ticket_age_add;
         };
@@ -2752,7 +2754,7 @@ test "buildClientHello: produces valid message" {
 
     // Pre-encode transport params
     var tp_enc_buf: [256]u8 = undefined;
-    var tp_fbs = std.io.fixedBufferStream(&tp_enc_buf);
+    var tp_fbs = io.fixedBufferStream(&tp_enc_buf);
     try tp.encode(tp_fbs.writer());
     const tp_encoded = tp_fbs.getWritten();
 
@@ -2803,7 +2805,7 @@ test "buildServerHello: produces valid message" {
 
 test "loopback handshake: client and server complete" {
     // Generate an ECDSA P-256 key pair for the server
-    const server_key_pair = EcdsaP256Sha256.KeyPair.generate();
+    const server_key_pair = EcdsaP256Sha256.KeyPair.generate(std.testing.io);
     const secret_key_bytes = server_key_pair.secret_key.toBytes();
 
     // Create a dummy self-signed certificate (just the public key info, not a real X.509)
@@ -2947,14 +2949,14 @@ test "early key derivation: client_early_traffic_secret from PSK" {
 test "loopback PSK resumption: two handshakes with session ticket" {
 
     // Generate server key pair
-    const server_key_pair = EcdsaP256Sha256.KeyPair.generate();
+    const server_key_pair = EcdsaP256Sha256.KeyPair.generate(std.testing.io);
     const secret_key_bytes = server_key_pair.secret_key.toBytes();
     const pub_key_bytes = server_key_pair.public_key.toUncompressedSec1();
     const fake_cert = pub_key_bytes;
 
     // Generate ticket key for server
     var ticket_key: [16]u8 = undefined;
-    crypto.random.bytes(&ticket_key);
+    sys.randomBytes(&ticket_key);
 
     const server_config = TlsConfig{
         .cert_chain_der = &[_][]const u8{&fake_cert},
@@ -3120,7 +3122,7 @@ test "NewSessionTicket: build and parse roundtrip" {
     var original = SessionTicket{ .psk = psk };
     original.lifetime = 86400;
     original.ticket_age_add = 0x12345678;
-    original.creation_time = std.time.timestamp();
+    original.creation_time = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
     original.max_early_data_size = 0xffffffff;
     @memcpy(original.ticket[0..64], &ticket_data);
     original.ticket_len = 64;

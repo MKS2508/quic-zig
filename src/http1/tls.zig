@@ -7,6 +7,8 @@
 // Supports: TLS_AES_128_GCM_SHA256, X25519 key exchange, ECDSA P-256 signatures.
 
 const std = @import("std");
+const sys = @import("../sys.zig");
+const net_compat = @import("../net_compat.zig");
 const crypto = std.crypto;
 const posix = std.posix;
 const net = std.net;
@@ -96,7 +98,7 @@ pub const TlsStream = struct {
 
         // 2. X25519 key exchange
         var x25519_secret: [32]u8 = undefined;
-        crypto.random.bytes(&x25519_secret);
+        sys.randomBytes(&x25519_secret);
         const x25519_public = try X25519.recoverPublicKey(x25519_secret);
 
         var shared_secret: [32]u8 = undefined;
@@ -105,7 +107,7 @@ pub const TlsStream = struct {
         } else if (ch.key_share_group == GROUP_SECP256R1) {
             const peer_point = P256.fromSec1(&ch.p256_public) catch return error.KeyExchangeFailed;
             var p256_secret: [32]u8 = undefined;
-            crypto.random.bytes(&p256_secret);
+            sys.randomBytes(&p256_secret);
             const shared_point = peer_point.mulPublic(p256_secret, .big) catch return error.KeyExchangeFailed;
             const shared_uncompressed = shared_point.toUncompressedSec1();
             @memcpy(&shared_secret, shared_uncompressed[1..33]);
@@ -118,7 +120,7 @@ pub const TlsStream = struct {
         // 3. Build and send ServerHello
         var sh_buf: [512]u8 = undefined;
         var server_random: [32]u8 = undefined;
-        crypto.random.bytes(&server_random);
+        sys.randomBytes(&server_random);
         const sh_msg = buildServerHello(&sh_buf, &server_random, &x25519_public, ch.session_id[0..ch.session_id_len]);
         transcript.update(sh_msg);
         try sendRecord(fd, CT_HANDSHAKE, sh_msg);
@@ -310,7 +312,7 @@ fn readRecord(fd: posix.fd_t, buf: []u8) !Record {
 fn readExact(fd: posix.fd_t, buf: []u8) !void {
     var total: usize = 0;
     while (total < buf.len) {
-        const n = posix.read(fd, buf[total..]) catch return error.ConnectionClosed;
+        const n = sys.read(fd, buf[total..]) catch return error.ConnectionClosed;
         if (n == 0) return error.ConnectionClosed;
         total += n;
     }
@@ -329,8 +331,8 @@ fn sendRecord(fd: posix.fd_t, content_type: u8, payload: []const u8) !void {
     }
     hdr[3] = @intCast(payload.len >> 8);
     hdr[4] = @intCast(payload.len & 0xff);
-    _ = try posix.write(fd, &hdr);
-    _ = try posix.write(fd, payload);
+    _ = try sys.write(fd, &hdr);
+    _ = try sys.write(fd, payload);
 }
 
 fn sendEncryptedRecord(
@@ -376,9 +378,9 @@ fn sendEncryptedRecord(
     seq.* += 1;
 
     // Send: header + ciphertext + tag
-    _ = try posix.write(fd, &aad);
-    _ = try posix.write(fd, ct_buf[0..inner_len]);
-    _ = try posix.write(fd, &tag);
+    _ = try sys.write(fd, &aad);
+    _ = try sys.write(fd, ct_buf[0..inner_len]);
+    _ = try sys.write(fd, &tag);
 }
 
 fn decryptRecord(

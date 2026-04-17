@@ -10,10 +10,11 @@
 
 const std = @import("std");
 const posix = std.posix;
-const net = std.net;
 const mem = std.mem;
 
 const lib = @import("quic");
+const sys = lib.sys;
+const net = lib.net_compat;
 const connection = lib.connection;
 const quic_crypto = lib.crypto;
 const tls13 = lib.tls13;
@@ -92,17 +93,17 @@ fn basename(path: []const u8) []const u8 {
     return path;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     // Read environment variables
-    const testcase_str = posix.getenv("TESTCASE") orelse "handshake";
+    const testcase_str = sys.getenv("TESTCASE") orelse "handshake";
     const testcase = parseTestCase(testcase_str);
-    const sslkeylogfile_path = posix.getenv("SSLKEYLOGFILE");
-    const qlog_dir = posix.getenv("QLOGDIR");
-    const download_dir = posix.getenv("DOWNLOADS") orelse "/downloads";
+    const sslkeylogfile_path = sys.getenv("SSLKEYLOGFILE");
+    const qlog_dir = sys.getenv("QLOGDIR");
+    const download_dir = sys.getenv("DOWNLOADS") orelse "/downloads";
 
     std.log.info("interop client: testcase={s}", .{testcase_str});
 
@@ -112,16 +113,17 @@ pub fn main() !void {
     }
 
     // Open SSLKEYLOGFILE if requested
-    var keylog_file: ?std.fs.File = null;
+    var keylog_file: ?sys.File = null;
     if (sslkeylogfile_path) |path| {
-        keylog_file = std.fs.cwd().createFile(path, .{}) catch null;
+        keylog_file = sys.createFile(path) catch null;
     }
     defer if (keylog_file) |f| f.close();
 
     // Parse request URLs from CLI args
-    const args = try std.process.argsAlloc(alloc);
+    var args_iter = std.process.Args.Iterator.init(init.args);
+    _ = args_iter.next(); // skip program name
     var urls: std.ArrayList(ParsedUrl) = .{ .items = &.{}, .capacity = 0 };
-    for (args[1..]) |arg| {
+    while (args_iter.next()) |arg| {
         if (parseUrl(arg)) |url| {
             try urls.append(alloc, url);
         }
@@ -198,7 +200,7 @@ fn downloadAll(
     alloc: std.mem.Allocator,
     urls: []const ParsedUrl,
     use_h3: bool,
-    keylog_file: ?std.fs.File,
+    keylog_file: ?sys.File,
     download_dir: []const u8,
     session_ticket: ?*const tls13.SessionTicket,
     force_key_update: bool,
@@ -213,35 +215,26 @@ fn downloadAll(
     const host = urls[0].host;
     const port = urls[0].port;
 
-    // Resolve server address (supports hostnames via DNS)
-    const server_addr = blk: {
-        // Try numeric IP first
-        break :blk net.Address.resolveIp(host, port) catch {
-            // Fall back to DNS resolution
-            const list = net.getAddressList(alloc, host, port) catch |err| {
-                std.log.err("failed to resolve {s}:{d}: {any}", .{ host, port, err });
-                return err;
-            };
-            defer list.deinit();
-            if (list.addrs.len == 0) {
-                std.log.err("no addresses for {s}:{d}", .{ host, port });
-                return error.UnknownHostName;
-            }
-            break :blk list.addrs[0];
-        };
+    // Resolve server address. The interop runner always passes numeric IPs,
+    // so pure parseIp is enough; DNS fallback was dropped when we stopped
+    // depending on `std.net` (0.16 moved hostname resolution under
+    // `std.Io.net.resolve`, which we haven't wired up yet).
+    const server_addr = net.Address.parseIp(host, port) catch |err| {
+        std.log.err("failed to parse {s}:{d}: {any}", .{ host, port, err });
+        return err;
     };
 
     // Always create IPv6 dual-stack socket to support preferred_address migration across families.
     // If the initial server address is IPv4, sendto converts it to IPv4-mapped IPv6 automatically.
-    const sockfd = try posix.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-    defer posix.close(sockfd);
+    const sockfd = try sys.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+    defer sys.close(sockfd);
     // Disable IPV6_V6ONLY to allow dual-stack (IPv4 and IPv6 on same socket)
     const IPV6_V6ONLY: u32 = if (@import("builtin").os.tag == .linux) 26 else 27;
     const zero: c_int = 0;
     posix.setsockopt(sockfd, posix.IPPROTO.IPV6, IPV6_V6ONLY, std.mem.asBytes(&zero)) catch {};
 
     const local_addr = try net.Address.parseIp6("::", 0);
-    try posix.bind(sockfd, &local_addr.any, local_addr.getOsSockLen());
+    try sys.bind(sockfd, &local_addr.any, local_addr.getOsSockLen());
     ecn_socket.enableEcnRecv(sockfd) catch {};
 
     // Build TLS config
@@ -284,10 +277,10 @@ fn downloadAll(
 
     // Handshake phase — use time-based timeout (30s) to handle high-RTT networks
     var handshake_complete = false;
-    const handshake_start = std.time.nanoTimestamp();
+    const handshake_start = sys.nanoTimestamp();
     const handshake_timeout_ns: i128 = 120 * std.time.ns_per_s;
 
-    while (!handshake_complete and (std.time.nanoTimestamp() - handshake_start) < handshake_timeout_ns) {
+    while (!handshake_complete and (sys.nanoTimestamp() - handshake_start) < handshake_timeout_ns) {
         // Fire PTO timer for handshake retransmissions
         conn.onTimeout() catch {};
 
@@ -299,7 +292,7 @@ fn downloadAll(
                 const bytes_written = conn.send(&out) catch break;
                 if (bytes_written == 0) break;
                 ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-                _ = posix.sendto(sockfd, out[0..bytes_written], 0, @ptrCast(&remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..bytes_written], 0, @ptrCast(&remote_addr), addr_size) catch {};
                 sent_any = true;
             }
         }
@@ -324,11 +317,11 @@ fn downloadAll(
         }
 
         // Only sleep when idle (nothing to send or receive)
-        if (!sent_any and !received_any) std.Thread.sleep(1 * std.time.ns_per_ms);
+        if (!sent_any and !received_any) sys.sleepNs(1 * std.time.ns_per_ms);
     }
 
     if (!handshake_complete) {
-        const elapsed_ms = @divTrunc(std.time.nanoTimestamp() - handshake_start, std.time.ns_per_ms);
+        const elapsed_ms = @divTrunc(sys.nanoTimestamp() - handshake_start, std.time.ns_per_ms);
         std.log.err("handshake failed after {d}ms", .{elapsed_ms});
         std.process.exit(1);
     }
@@ -339,7 +332,7 @@ fn downloadAll(
     const hs_bytes = conn.send(&out) catch 0;
     if (hs_bytes > 0) {
         ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-        _ = posix.sendto(sockfd, out[0..hs_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
+        _ = sys.sendto(sockfd, out[0..hs_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
     }
 
     // Sync remote_addr from active path (may have changed due to preferred_address migration)
@@ -357,11 +350,11 @@ fn downloadAll(
     if (!skip_ticket_and_drain and conn.session_ticket == null) {
         var ticket_iter: usize = 0;
         while (conn.session_ticket == null and ticket_iter < 100) : (ticket_iter += 1) {
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            sys.sleepNs(5 * std.time.ns_per_ms);
             drainRecv(&conn, sockfd, local_addr, &remote_addr, &addr_size);
             const more = conn.send(&out) catch 0;
             if (more > 0) {
-                _ = posix.sendto(sockfd, out[0..more], 0, @ptrCast(&remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..more], 0, @ptrCast(&remote_addr), addr_size) catch {};
             }
         }
     }
@@ -373,19 +366,19 @@ fn downloadAll(
     conn.close(0, "done");
     const final_bytes = conn.send(&out) catch 0;
     if (final_bytes > 0) {
-        _ = posix.sendto(sockfd, out[0..final_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
+        _ = sys.sendto(sockfd, out[0..final_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
     }
 
     if (!skip_ticket_and_drain) {
         // Drain — brief drain to send CONNECTION_CLOSE, don't wait for full 3×PTO
         var drain_iter: usize = 0;
         while (!conn.isClosed() and drain_iter < 10) : (drain_iter += 1) {
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            sys.sleepNs(5 * std.time.ns_per_ms);
             conn.onTimeout() catch break;
             drainRecv(&conn, sockfd, local_addr, &remote_addr, &addr_size);
             const retransmit_bytes = conn.send(&out) catch 0;
             if (retransmit_bytes > 0) {
-                _ = posix.sendto(sockfd, out[0..retransmit_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..retransmit_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
             }
         }
     }
@@ -453,7 +446,7 @@ fn downloadH0(
             const more = conn.send(&out) catch break;
             if (more == 0) break;
             ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-            _ = posix.sendto(sockfd, out[0..more], 0, @ptrCast(remote_addr), addr_size) catch break;
+            _ = sys.sendto(sockfd, out[0..more], 0, @ptrCast(remote_addr), addr_size) catch break;
         }
     }
 
@@ -462,10 +455,10 @@ fn downloadH0(
     var total_bytes_received: usize = 0;
     var key_update_done = false;
     var h0_last_progress: usize = 0;
-    const download_start = std.time.nanoTimestamp();
+    const download_start = sys.nanoTimestamp();
     const download_timeout_ns: i128 = 60 * std.time.ns_per_s;
 
-    while (completed < urls.len and (std.time.nanoTimestamp() - download_start) < download_timeout_ns) {
+    while (completed < urls.len and (sys.nanoTimestamp() - download_start) < download_timeout_ns) {
         // Exit early if connection is dead
         if (conn.isClosed() or conn.isDraining()) {
             std.log.warn("H0: connection terminated during download, completed {d}/{d}", .{ completed, urls.len });
@@ -497,7 +490,7 @@ fn downloadH0(
                 });
             }
         }
-        if (packets_received == 0) std.Thread.sleep(1 * std.time.ns_per_ms);
+        if (packets_received == 0) sys.sleepNs(1 * std.time.ns_per_ms);
 
         // Force key update after receiving some data (not too early, so in-flight
         // old-key packets don't confuse tshark's QUIC decryption)
@@ -518,7 +511,7 @@ fn downloadH0(
                 const ack_bytes = conn.send(&out) catch break;
                 if (ack_bytes == 0) break;
                 ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-                _ = posix.sendto(sockfd, out[0..ack_bytes], 0, @ptrCast(remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..ack_bytes], 0, @ptrCast(remote_addr), addr_size) catch {};
             }
         }
 
@@ -613,17 +606,17 @@ fn downloadH3(
         const more = conn.send(&out) catch break;
         if (more == 0) break;
         ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-        _ = posix.sendto(sockfd, out[0..more], 0, @ptrCast(remote_addr), addr_size) catch break;
+        _ = sys.sendto(sockfd, out[0..more], 0, @ptrCast(remote_addr), addr_size) catch break;
     }
 
     // Read responses — use time-based timeout (60s)
     var completed: usize = 0;
     var total_bytes_received: usize = 0;
     var key_update_done = false;
-    const h3_download_start = std.time.nanoTimestamp();
+    const h3_download_start = sys.nanoTimestamp();
     const h3_download_timeout_ns: i128 = 60 * std.time.ns_per_s;
 
-    while (completed < urls.len and (std.time.nanoTimestamp() - h3_download_start) < h3_download_timeout_ns) {
+    while (completed < urls.len and (sys.nanoTimestamp() - h3_download_start) < h3_download_timeout_ns) {
         // Exit early if connection is dead
         if (conn.isClosed() or conn.isDraining()) {
             std.log.warn("H3: connection terminated during download, completed {d}/{d}", .{ completed, urls.len });
@@ -646,7 +639,7 @@ fn downloadH3(
                 });
             }
         }
-        if (packets_received == 0) std.Thread.sleep(1 * std.time.ns_per_ms);
+        if (packets_received == 0) sys.sleepNs(1 * std.time.ns_per_ms);
 
         // Force key update after receiving some data (not too early, so in-flight
         // old-key packets don't confuse tshark's QUIC decryption)
@@ -667,7 +660,7 @@ fn downloadH3(
                 const ack_bytes = conn.send(&out) catch break;
                 if (ack_bytes == 0) break;
                 ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-                _ = posix.sendto(sockfd, out[0..ack_bytes], 0, @ptrCast(remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..ack_bytes], 0, @ptrCast(remote_addr), addr_size) catch {};
             }
         }
 
@@ -723,7 +716,7 @@ fn saveFile(dir: []const u8, filename: []const u8, data: []const u8) !void {
     pos += filename.len;
 
     const path = path_buf[0..pos];
-    const file = try std.fs.cwd().createFile(path, .{});
+    const file = try sys.createFile(path);
     defer file.close();
     try file.writeAll(data);
     std.log.info("saved {s} ({d} bytes)", .{ path, data.len });

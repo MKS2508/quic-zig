@@ -1,4 +1,6 @@
 const std = @import("std");
+const io = @import("../io_compat.zig");
+const sys = @import("../sys.zig");
 const net = std.net;
 const posix = std.posix;
 const crypto = std.crypto;
@@ -50,9 +52,9 @@ pub const PathValidator = struct {
     const MAX_RETRIES: u8 = 3;
 
     pub fn startChallenge(self: *PathValidator) [8]u8 {
-        crypto.random.bytes(&self.challenge_data);
+        sys.randomBytes(&self.challenge_data);
         self.state = .pending;
-        self.challenge_sent_time = @intCast(std.time.nanoTimestamp());
+        self.challenge_sent_time = @intCast(sys.nanoTimestamp());
         self.retries = 0;
         return self.challenge_data;
     }
@@ -85,7 +87,7 @@ pub const PathValidator = struct {
 
     pub fn retry(self: *PathValidator) void {
         self.retries += 1;
-        self.challenge_sent_time = @intCast(std.time.nanoTimestamp());
+        self.challenge_sent_time = @intCast(sys.nanoTimestamp());
     }
 };
 
@@ -231,7 +233,7 @@ pub const LocalCidPool = struct {
         if (static_key) |key| {
             self.entries[0].stateless_reset_token = stateless_reset.computeToken(key, cid);
         } else {
-            crypto.random.bytes(&self.entries[0].stateless_reset_token);
+            sys.randomBytes(&self.entries[0].stateless_reset_token);
         }
     }
 
@@ -267,7 +269,7 @@ pub const LocalCidPool = struct {
                 if (static_key) |key| {
                     entry.stateless_reset_token = stateless_reset.computeToken(key, entry.cid_buf[0..cid_len]);
                 } else {
-                    crypto.random.bytes(&entry.stateless_reset_token);
+                    sys.randomBytes(&entry.stateless_reset_token);
                 }
                 self.next_seq_num += 1;
                 return entry;
@@ -290,7 +292,7 @@ pub const LocalCidPool = struct {
                 if (static_key) |key| {
                     entry.stateless_reset_token = stateless_reset.computeToken(key, entry.cid_buf[0..cid_len]);
                 } else {
-                    crypto.random.bytes(&entry.stateless_reset_token);
+                    sys.randomBytes(&entry.stateless_reset_token);
                 }
                 self.next_seq_num += 1;
                 return entry;
@@ -388,7 +390,7 @@ pub const DatagramQueue = struct {
         if (self.count >= self.effectiveCapacity() or data.len > MAX_DATAGRAM_SIZE) return false;
         @memcpy(self.getBuf(self.tail)[0..data.len], data);
         self.getLen(self.tail).* = data.len;
-        self.getTime(self.tail).* = @intCast(std.time.nanoTimestamp());
+        self.getTime(self.tail).* = @intCast(sys.nanoTimestamp());
         self.tail = (self.tail + 1) % self.max_items;
         self.count += 1;
         return true;
@@ -713,7 +715,7 @@ pub const Connection = struct {
         if (odcid != null) {
             initial_path.is_validated = true;
         }
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        const now: i64 = @intCast(sys.nanoTimestamp());
 
         var conn = Connection{
             .allocator = allocator,
@@ -759,7 +761,7 @@ pub const Connection = struct {
         }
 
         // Generate static reset key for deterministic tokens
-        crypto.random.bytes(&conn.static_reset_key);
+        sys.randomBytes(&conn.static_reset_key);
 
         // Register initial SCID in local CID pool with deterministic token
         conn.local_cid_pool.registerInitialCid(conn.scid[0..conn.scid_len], conn.static_reset_key);
@@ -888,7 +890,7 @@ pub const Connection = struct {
 
     pub fn deinit(self: *Connection) void {
         if (self.qlog_writer) |*ql| {
-            const now: i64 = @intCast(std.time.nanoTimestamp());
+            const now: i64 = @intCast(sys.nanoTimestamp());
             ql.connectionClosed(now, "application", 0);
             ql.deinit();
             self.qlog_writer = null;
@@ -1011,12 +1013,12 @@ pub const Connection = struct {
         // Guard: don't process packets in terminal states (RFC 9000 §10)
         if (self.state == .terminated) return;
         if (self.state == .draining) {
-            self.last_packet_received_time = @intCast(std.time.nanoTimestamp());
+            self.last_packet_received_time = @intCast(sys.nanoTimestamp());
             return;
         }
         if (self.state == .closing) {
             self.needs_close_retransmit = true;
-            self.last_packet_received_time = @intCast(std.time.nanoTimestamp());
+            self.last_packet_received_time = @intCast(sys.nanoTimestamp());
             return;
         }
 
@@ -1076,7 +1078,7 @@ pub const Connection = struct {
                 return error.InvalidPacket;
             }
 
-            const now: i64 = @intCast(std.time.nanoTimestamp());
+            const now: i64 = @intCast(sys.nanoTimestamp());
             self.last_packet_received_time = now;
             self.keep_alive_ping_sent = false;
             self.total_packets_received += 1;
@@ -1152,7 +1154,7 @@ pub const Connection = struct {
             return error.ProtocolViolation;
         }
 
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        const now: i64 = @intCast(sys.nanoTimestamp());
         self.last_packet_received_time = now;
         self.keep_alive_ping_sent = false;
 
@@ -2060,7 +2062,7 @@ pub const Connection = struct {
         _ = self;
         _ = frame;
         // Create a temporary stream to measure how far parsing advances
-        var fbs = std.io.fixedBufferStream(@constCast(buf));
+        var fbs = io.fixedBufferStream(@constCast(buf));
         const reader = fbs.reader();
         const frame_type = packet.readVarInt(reader) catch return 1;
 
@@ -2323,7 +2325,7 @@ pub const Connection = struct {
                                 }
                             }
                             if (self.qlog_writer) |*ql| {
-                                const now_ql: i64 = @intCast(std.time.nanoTimestamp());
+                                const now_ql: i64 = @intCast(sys.nanoTimestamp());
                                 ql.keyUpdated(now_ql, "tls", if (self.is_server) "server_0rtt_secret" else "client_0rtt_secret");
                             }
                         },
@@ -2337,7 +2339,7 @@ pub const Connection = struct {
                                 self.pkt_num_spaces[0].crypto_seal = null;
                             }
                             if (self.qlog_writer) |*ql| {
-                                const now_ql: i64 = @intCast(std.time.nanoTimestamp());
+                                const now_ql: i64 = @intCast(sys.nanoTimestamp());
                                 ql.keyUpdated(now_ql, "tls", "server_handshake_secret");
                                 ql.keyUpdated(now_ql, "tls", "client_handshake_secret");
                             }
@@ -2350,7 +2352,7 @@ pub const Connection = struct {
                         .application => {
                             self.installAppKeys(ik.open, ik.seal);
                             if (self.qlog_writer) |*ql| {
-                                const now_ql: i64 = @intCast(std.time.nanoTimestamp());
+                                const now_ql: i64 = @intCast(sys.nanoTimestamp());
                                 ql.keyUpdated(now_ql, "tls", "server_1rtt_secret");
                                 ql.keyUpdated(now_ql, "tls", "client_1rtt_secret");
                             }
@@ -2752,7 +2754,7 @@ pub const Connection = struct {
         // Draining/terminated: do not send anything
         if (self.state == .draining or self.state == .terminated) return 0;
 
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        const now: i64 = @intCast(sys.nanoTimestamp());
 
         // Closing: retransmit saved close packet on each incoming packet (RFC 9000 §10.2.1)
         if (self.state == .closing) {
@@ -3126,7 +3128,7 @@ pub const Connection = struct {
     pub fn onTimeout(self: *Connection) !void {
         if (self.state == .terminated) return;
 
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        const now: i64 = @intCast(sys.nanoTimestamp());
 
         // Closing/draining: wait 3×PTO then terminate (RFC 9000 §10.2)
         if (self.state == .closing or self.state == .draining) {
@@ -3456,7 +3458,7 @@ pub const Connection = struct {
     pub fn close(self: *Connection, error_code: u64, reason: []const u8) void {
         if (self.state == .closing or self.state == .draining or self.state == .terminated) return;
         self.state = .closing;
-        self.closing_start_time = @intCast(std.time.nanoTimestamp());
+        self.closing_start_time = @intCast(sys.nanoTimestamp());
         self.local_err = .{
             .is_app = true,
             .code = error_code,
@@ -3567,7 +3569,7 @@ pub const Connection = struct {
     pub fn closeWithTransportError(self: *Connection, error_code: u64, frame_type: u64, reason: []const u8) void {
         if (self.state == .closing or self.state == .draining or self.state == .terminated) return;
         self.state = .closing;
-        self.closing_start_time = @intCast(std.time.nanoTimestamp());
+        self.closing_start_time = @intCast(sys.nanoTimestamp());
         self.local_err = .{
             .is_app = false,
             .code = error_code,
@@ -3635,14 +3637,14 @@ pub const Connection = struct {
     /// Receive a QUIC DATAGRAM frame (RFC 9221).
     /// Returns the number of bytes written to buf, or null if no datagram available.
     pub fn recvDatagram(self: *Connection, buf: []u8) ?usize {
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        const now: i64 = @intCast(sys.nanoTimestamp());
         return self.datagram_recv_queue.popSkipExpired(buf, now);
     }
 
     /// Zero-copy datagram receive: returns a slice into the internal ring buffer.
     /// Caller MUST call consumeDatagram() after processing the data.
     pub fn peekDatagram(self: *Connection) ?[]const u8 {
-        const now: i64 = @intCast(std.time.nanoTimestamp());
+        const now: i64 = @intCast(sys.nanoTimestamp());
         return self.datagram_recv_queue.peekDataSkipExpired(now);
     }
 
@@ -3771,7 +3773,7 @@ pub const Connection = struct {
         // Pacer: if the pacer has bandwidth set (active transfer), include its
         // next-send time so the event loop wakes up promptly to send more data.
         if (self.pacer.bandwidth_shifted > 0 and self.state == .connected) {
-            const now: i64 = @intCast(std.time.nanoTimestamp());
+            const now: i64 = @intCast(sys.nanoTimestamp());
             // Estimate pacer delay without mutating: budget is replenished by elapsed time
             const elapsed = now - self.pacer.last_sent_time;
             var budget = self.pacer.budget;
@@ -3813,7 +3815,7 @@ pub const Connection = struct {
 
     pub fn dropHandshakeKeys(self: *Connection) void {
         if (self.qlog_writer) |*ql| {
-            const now_ql: i64 = @intCast(std.time.nanoTimestamp());
+            const now_ql: i64 = @intCast(sys.nanoTimestamp());
             ql.keyDiscarded(now_ql, "client_initial_secret");
             ql.keyDiscarded(now_ql, "server_initial_secret");
             ql.keyDiscarded(now_ql, "client_handshake_secret");
@@ -3835,7 +3837,7 @@ pub const Connection = struct {
     pub fn initiateKeyUpdate(self: *Connection) bool {
         if (self.key_update) |*ku| {
             if (ku.canUpdate()) {
-                const now = @as(i64, @intCast(std.time.nanoTimestamp()));
+                const now = @as(i64, @intCast(sys.nanoTimestamp()));
                 const pto_ns = self.pkt_handler.rtt_stats.pto();
                 ku.rollKeys(now, pto_ns);
                 self.packer.key_phase = ku.key_phase;
@@ -3980,7 +3982,7 @@ pub const Connection = struct {
     /// Handles header parsing, coalesced packet boundaries (RFC 9000 §12.2),
     /// and dispatches each packet through recv().
     pub fn handleDatagram(self: *Connection, bytes: []u8, info: RecvInfo) void {
-        var fbs = std.io.fixedBufferStream(bytes);
+        var fbs = io.fixedBufferStream(bytes);
         var first_packet = true;
         while (fbs.pos < bytes.len) {
             // All valid QUIC packets have the fixed bit (0x40) set.
@@ -4085,7 +4087,7 @@ pub fn sockaddrToStorage(addr: *const posix.sockaddr) posix.sockaddr.storage {
 
 /// Generates a new random connection ID of the given size into the provided buffer.
 pub fn generateConnectionId(buf: []u8) void {
-    crypto.random.bytes(buf);
+    sys.randomBytes(buf);
 }
 
 /// Create a client-side connection and generate the initial packet.
@@ -4101,7 +4103,7 @@ pub fn connect(
     tls_config: ?tls13.TlsConfig,
     initial_token: ?[]const u8,
 ) !Connection {
-    const now: i64 = @intCast(std.time.nanoTimestamp());
+    const now: i64 = @intCast(sys.nanoTimestamp());
     var scid: [8]u8 = undefined;
     var dcid: [8]u8 = undefined;
     generateConnectionId(&scid);
@@ -4178,7 +4180,7 @@ pub fn connect(
     }
 
     // Generate static reset key and register initial SCID with deterministic token
-    crypto.random.bytes(&conn.static_reset_key);
+    sys.randomBytes(&conn.static_reset_key);
     conn.local_cid_pool.registerInitialCid(conn.scid[0..conn.scid_len], conn.static_reset_key);
 
     std.log.info("connection.connect: dcid={any}, scid={any}", .{ dcid, scid });
@@ -4241,7 +4243,7 @@ pub fn connect(
     } else {
         // Legacy: queue transport parameters as placeholder crypto data
         var tp_buf: [256]u8 = undefined;
-        var tp_fbs = std.io.fixedBufferStream(&tp_buf);
+        var tp_fbs = io.fixedBufferStream(&tp_buf);
         try conn.local_params.encode(tp_fbs.writer());
         const tp_data = tp_fbs.getWritten();
         const cs = conn.crypto_streams.getStream(0); // Initial level
@@ -4538,7 +4540,7 @@ test "DatagramQueue: max age expiry on pop" {
     try std.testing.expect(q.push("new"));
 
     // Both datagrams are fresh — popSkipExpired should return first
-    const now: i64 = @intCast(std.time.nanoTimestamp());
+    const now: i64 = @intCast(sys.nanoTimestamp());
     var buf: [1200]u8 = undefined;
     const len = q.popSkipExpired(&buf, now);
     try std.testing.expect(len != null);
@@ -4549,7 +4551,7 @@ test "DatagramQueue: peekDataSkipExpired with no max age" {
     var q = DatagramQueue{};
     // No max_age set — behaves like peekData
     try std.testing.expect(q.push("data"));
-    const now: i64 = @intCast(std.time.nanoTimestamp());
+    const now: i64 = @intCast(sys.nanoTimestamp());
     const peeked = q.peekDataSkipExpired(now);
     try std.testing.expect(peeked != null);
     try std.testing.expectEqualSlices(u8, "data", peeked.?);
@@ -5101,7 +5103,7 @@ test "keep_alive_ping_sent resets on packet receipt simulation" {
 
     conn.keep_alive_ping_sent = true;
     // Simulate what recv() does
-    conn.last_packet_received_time = @intCast(std.time.nanoTimestamp());
+    conn.last_packet_received_time = @intCast(sys.nanoTimestamp());
     conn.keep_alive_ping_sent = false;
     try std.testing.expect(!conn.keep_alive_ping_sent);
 }

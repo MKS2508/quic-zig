@@ -20,7 +20,7 @@
 // list of §1.4.3 used by SETUP options and message parameters.
 
 const std = @import("std");
-const io = std.io;
+const io = @import("../io_compat.zig");
 const testing = std.testing;
 
 pub const Error = error{

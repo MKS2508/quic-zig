@@ -13,6 +13,7 @@ const std = @import("std");
 const posix = std.posix;
 
 const lib = @import("quic");
+const sys = lib.sys;
 const event_loop = lib.event_loop;
 const connection = lib.connection;
 const quic_crypto = lib.crypto;
@@ -130,19 +131,19 @@ const H0InteropHandler = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(_: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     // Read environment variables
-    const testcase_str = std.posix.getenv("TESTCASE") orelse "handshake";
+    const testcase_str = sys.getenv("TESTCASE") orelse "handshake";
     const testcase = parseTestCase(testcase_str);
-    const sslkeylogfile_path = std.posix.getenv("SSLKEYLOGFILE");
-    const qlog_dir = std.posix.getenv("QLOGDIR");
-    const www_dir = std.posix.getenv("WWW") orelse "/www";
-    const certs_dir = std.posix.getenv("CERTS") orelse "/certs";
-    const port_str = std.posix.getenv("PORT") orelse "443";
+    const sslkeylogfile_path = sys.getenv("SSLKEYLOGFILE");
+    const qlog_dir = sys.getenv("QLOGDIR");
+    const www_dir = sys.getenv("WWW") orelse "/www";
+    const certs_dir = sys.getenv("CERTS") orelse "/certs";
+    const port_str = sys.getenv("PORT") orelse "443";
 
     std.log.info("interop server: testcase={s}", .{testcase_str});
 
@@ -152,8 +153,8 @@ pub fn main() !void {
     }
 
     // Open SSLKEYLOGFILE if requested
-    const keylog_file: ?std.fs.File = if (sslkeylogfile_path) |path|
-        std.fs.cwd().createFile(path, .{}) catch null
+    const keylog_file: ?sys.File = if (sslkeylogfile_path) |path|
+        sys.createFile(path) catch null
     else
         null;
     defer if (keylog_file) |f| f.close();
@@ -186,13 +187,13 @@ pub fn main() !void {
     alpn[0] = if (use_h3) "h3" else "hq-interop";
 
     var ticket_key: [16]u8 = undefined;
-    std.crypto.random.bytes(&ticket_key);
+    sys.randomBytes(&ticket_key);
 
     var retry_token_key: [16]u8 = undefined;
-    std.crypto.random.bytes(&retry_token_key);
+    sys.randomBytes(&retry_token_key);
 
     var static_reset_key: [16]u8 = undefined;
-    std.crypto.random.bytes(&static_reset_key);
+    sys.randomBytes(&static_reset_key);
 
     const cipher_only: ?quic_crypto.CipherSuite = if (testcase == .chacha20) .chacha20_poly1305_sha256 else null;
 
@@ -223,7 +224,7 @@ pub fn main() !void {
                 pref.ipv6_port = preferred_port;
             }
             pref.cid_len = 8;
-            std.crypto.random.bytes(pref.cid_buf[0..8]);
+            sys.randomBytes(pref.cid_buf[0..8]);
             const stateless_reset = lib.stateless_reset;
             pref.stateless_reset_token = stateless_reset.computeToken(static_reset_key, pref.cid_buf[0..8]);
             preferred_addr = pref;
@@ -300,11 +301,11 @@ fn readFileFromWww(alloc: std.mem.Allocator, www_dir: []const u8, path: []const 
     @memcpy(full_path_buf[pos..][0..clean_path.len], clean_path);
     pos += clean_path.len;
 
-    return std.fs.cwd().readFileAlloc(alloc, full_path_buf[0..pos], 10 * 1024 * 1024);
+    return sys.readFileAlloc(alloc, full_path_buf[0..pos], 10 * 1024 * 1024);
 }
 
 fn loadFile(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.fs.cwd().readFileAlloc(alloc, path, 65536);
+    return sys.readFileAlloc(alloc, path, 65536);
 }
 
 /// Discover the server's non-loopback IPv4 and IPv6 addresses from network interfaces.

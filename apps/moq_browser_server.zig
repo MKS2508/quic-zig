@@ -8,6 +8,8 @@
 
 const std = @import("std");
 const quic = @import("quic");
+const io_compat = @import("quic").io_compat;
+const sys = quic.sys;
 const event_loop = quic.event_loop;
 const tls13 = quic.tls13;
 const connection_mod = quic.connection;
@@ -229,7 +231,7 @@ const RelayHandler = struct {
         self.clients[ci].control_out = ctrl;
 
         var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
+        var fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writeSetup(fbs.writer(), .{ .implementation = "quic-zig/moq-wt-relay" }) catch return;
         session.sendStreamData(ctrl, buf[0..fbs.pos]) catch return;
         self.clients[ci].setup_sent = true;
@@ -278,7 +280,7 @@ const RelayHandler = struct {
         // SETUP (0x2F00) is a 2-byte varint; subgroup stream types are single
         // bytes in 0x10..0x3D. If the first byte has the 0x80 bit set and is
         // one of the SETUP pattern bytes, treat as control. Otherwise data.
-        var peek = std.io.fixedBufferStream(@as([]const u8, buf.slice()));
+        var peek = io_compat.fixedBufferStream(@as([]const u8, buf.slice()));
         const first_varint = moq_wire.readVarInt(peek.reader()) catch {
             self.clients[ci].setRole(stream_id, .data);
             self.tryForwardData(ci, stream_id, fin);
@@ -348,7 +350,7 @@ const RelayHandler = struct {
             t.sub_count += 1;
 
             var buf: [256]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&buf);
+            var fbs = io_compat.fixedBufferStream(&buf);
             moq_msg.writeSubscribeOk(fbs.writer(), .{ .track_alias = alias }) catch return;
             session.sendStreamData(stream_id, buf[0..fbs.pos]) catch return;
             std.debug.print("[relay] SUBSCRIBE_OK → client {d} alias={d} (track {d}, {d} subs, pub={?d})\n", .{
@@ -377,7 +379,7 @@ const RelayHandler = struct {
             const out = sub_wtc.openUniStream(sub_sid, null) catch continue;
 
             var hdr_buf: [128]u8 = undefined;
-            var hdr_fbs = std.io.fixedBufferStream(&hdr_buf);
+            var hdr_fbs = io_compat.fixedBufferStream(&hdr_buf);
             moq_obj.writeSubgroupHeader(hdr_fbs.writer(), .{
                 .track_alias = sub_alias,
                 .group = cg.group_id,
@@ -418,7 +420,7 @@ const RelayHandler = struct {
         t.pub_alias = pub_msg.track_alias;
 
         var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
+        var fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writePublishOk(fbs.writer(), .{}) catch return;
         session.sendStreamData(stream_id, buf[0..fbs.pos]) catch return;
         std.debug.print("[relay] PUBLISH_OK → client {d} (track {d}, {d} subs)\n", .{ ci, ti, t.sub_count });
@@ -431,7 +433,7 @@ const RelayHandler = struct {
         // First: parse the header and open sub-streams once per input stream.
         if (!fs.header_parsed) {
             if (buf.len < 3) return; // need more bytes
-            var fbs = std.io.fixedBufferStream(@as([]const u8, buf.slice()));
+            var fbs = io_compat.fixedBufferStream(@as([]const u8, buf.slice()));
             const parsed = moq_obj.readSubgroupHeader(&fbs) catch return; // need more bytes or bad
             const h = parsed.header;
 
@@ -471,7 +473,7 @@ const RelayHandler = struct {
                 };
 
                 var hdr_buf: [128]u8 = undefined;
-                var hdr_fbs = std.io.fixedBufferStream(&hdr_buf);
+                var hdr_fbs = io_compat.fixedBufferStream(&hdr_buf);
                 moq_obj.writeSubgroupHeader(hdr_fbs.writer(), .{
                     .track_alias = t.sub_alias[si],
                     .group = h.group,
@@ -551,7 +553,7 @@ const RelayHandler = struct {
     pub fn onDatagram(_: *RelayHandler, _: *event_loop.Session, _: u64, _: []const u8) void {}
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -560,7 +562,7 @@ pub fn main() !void {
     var cert_path: []const u8 = "interop/browser/certs/server.crt";
     var key_path: []const u8 = "interop/browser/certs/server.key";
 
-    var args = std.process.args();
+    var args = std.process.Args.Iterator.init(init.args);
     _ = args.next();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
@@ -572,7 +574,7 @@ pub fn main() !void {
         }
     }
 
-    const server_cert_pem = try std.fs.cwd().readFileAlloc(alloc, cert_path, 8192);
+    const server_cert_pem = try sys.readFileAlloc(alloc, cert_path, 8192);
     var cert_der_buf: [4096]u8 = undefined;
     const cert_der = try tls13.parsePemCert(server_cert_pem, &cert_der_buf);
     var cert_hash: [32]u8 = undefined;

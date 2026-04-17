@@ -1,4 +1,7 @@
 // Public API re-exports for the quic-zig library.
+pub const sys = @import("sys.zig");
+pub const net_compat = @import("net_compat.zig");
+pub const io_compat = @import("io_compat.zig");
 pub const connection = @import("quic/connection.zig");
 pub const connection_manager = @import("quic/connection_manager.zig");
 pub const crypto = @import("quic/crypto.zig");

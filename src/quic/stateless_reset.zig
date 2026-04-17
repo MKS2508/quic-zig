@@ -1,4 +1,5 @@
 const std = @import("std");
+const sys = @import("../sys.zig");
 const crypto = std.crypto;
 const HmacSha256 = crypto.auth.hmac.sha2.HmacSha256;
 
@@ -21,7 +22,7 @@ pub fn generatePacket(out: []u8, max_size: usize, static_key: [16]u8, conn_id: [
     if (size < MIN_PACKET_LEN) return 0;
 
     // Fill entire packet with random bytes
-    crypto.random.bytes(out[0..size]);
+    sys.randomBytes(out[0..size]);
 
     // First byte: must look like short header (bit 7 clear = 0, fixed bit 6 = random already)
     // Clear the long header bit (0x80)

@@ -10,10 +10,11 @@
 
 const std = @import("std");
 const posix = std.posix;
-const net = std.net;
+const net = @import("quic").net_compat;
 const mem = std.mem;
 
 const lib = @import("quic");
+const sys = lib.sys;
 const connection = lib.connection;
 const quic_crypto = lib.crypto;
 const tls13 = lib.tls13;
@@ -119,17 +120,17 @@ fn basename(path: []const u8) []const u8 {
     return path;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     // Read environment variables
-    const testcase_str = posix.getenv("TESTCASE") orelse "handshake";
+    const testcase_str = sys.getenv("TESTCASE") orelse "handshake";
     const testcase = parseTestCase(testcase_str);
-    const sslkeylogfile_path = posix.getenv("SSLKEYLOGFILE");
-    const qlog_dir = posix.getenv("QLOGDIR");
-    const download_dir = posix.getenv("DOWNLOADS") orelse "/downloads";
+    const sslkeylogfile_path = sys.getenv("SSLKEYLOGFILE");
+    const qlog_dir = sys.getenv("QLOGDIR");
+    const download_dir = sys.getenv("DOWNLOADS") orelse "/downloads";
 
     std.log.info("interop client: testcase={s}", .{testcase_str});
 
@@ -139,16 +140,17 @@ pub fn main() !void {
     }
 
     // Open SSLKEYLOGFILE if requested
-    var keylog_file: ?std.fs.File = null;
+    var keylog_file: ?sys.File = null;
     if (sslkeylogfile_path) |path| {
-        keylog_file = std.fs.cwd().createFile(path, .{}) catch null;
+        keylog_file = sys.createFile(path) catch null;
     }
     defer if (keylog_file) |f| f.close();
 
     // Parse request URLs from CLI args
-    const args = try std.process.argsAlloc(alloc);
+    var args_iter = std.process.Args.Iterator.init(init.args);
+    _ = args_iter.next(); // skip program name
     var urls: std.ArrayList(ParsedUrl) = .{ .items = &.{}, .capacity = 0 };
-    for (args[1..]) |arg| {
+    while (args_iter.next()) |arg| {
         if (parseUrl(arg)) |url| {
             try urls.append(alloc, url);
         }
@@ -242,7 +244,7 @@ fn downloadAll(
     alloc: std.mem.Allocator,
     urls: []const ParsedUrl,
     use_h3: bool,
-    keylog_file: ?std.fs.File,
+    keylog_file: ?sys.File,
     download_dir: []const u8,
     session_ticket: ?*const tls13.SessionTicket,
     force_key_update: bool,
@@ -258,35 +260,24 @@ fn downloadAll(
     const host = urls[0].host;
     const port = urls[0].port;
 
-    // Resolve server address (supports hostnames via DNS)
-    const server_addr = blk: {
-        // Try numeric IP first
-        break :blk net.Address.resolveIp(host, port) catch {
-            // Fall back to DNS resolution
-            const list = net.getAddressList(alloc, host, port) catch |err| {
-                std.log.err("failed to resolve {s}:{d}: {any}", .{ host, port, err });
-                return err;
-            };
-            defer list.deinit();
-            if (list.addrs.len == 0) {
-                std.log.err("no addresses for {s}:{d}", .{ host, port });
-                return error.UnknownHostName;
-            }
-            break :blk list.addrs[0];
-        };
+    // Numeric IP only; DNS fallback dropped during 0.16 port (std.net.getAddressList
+    // moved under std.Io.net.resolve which needs an Io instance).
+    const server_addr = net.Address.parseIp(host, port) catch |err| {
+        std.log.err("failed to parse {s}:{d}: {any}", .{ host, port, err });
+        return err;
     };
 
     // Always create IPv6 dual-stack socket to support preferred_address migration across families.
     // If the initial server address is IPv4, sendto converts it to IPv4-mapped IPv6 automatically.
-    const sockfd = try posix.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
-    defer posix.close(sockfd);
+    const sockfd = try sys.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0);
+    defer sys.close(sockfd);
     // Disable IPV6_V6ONLY to allow dual-stack (IPv4 and IPv6 on same socket)
     const IPV6_V6ONLY: u32 = if (@import("builtin").os.tag == .linux) 26 else 27;
     const zero: c_int = 0;
     posix.setsockopt(sockfd, posix.IPPROTO.IPV6, IPV6_V6ONLY, std.mem.asBytes(&zero)) catch {};
 
     const local_addr = try net.Address.parseIp6("::", 0);
-    try posix.bind(sockfd, &local_addr.any, local_addr.getOsSockLen());
+    try sys.bind(sockfd, &local_addr.any, local_addr.getOsSockLen());
     ecn_socket.enableEcnRecv(sockfd) catch {};
 
     // Build TLS config
@@ -333,16 +324,16 @@ fn downloadAll(
             const bytes_written = conn.send(&out) catch break;
             if (bytes_written == 0) break;
             ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-            _ = posix.sendto(sockfd, out[0..bytes_written], 0, @ptrCast(&remote_addr), addr_size) catch {};
+            _ = sys.sendto(sockfd, out[0..bytes_written], 0, @ptrCast(&remote_addr), addr_size) catch {};
         }
     }
 
     // Handshake phase — shorter timeout for multiconnect (many sequential connections)
     var handshake_complete = false;
-    const handshake_start = std.time.nanoTimestamp();
+    const handshake_start = sys.nanoTimestamp();
     const handshake_timeout_ns: i128 = if (skip_ticket_and_drain) MULTICONNECT_HANDSHAKE_TIMEOUT_S * std.time.ns_per_s else DEFAULT_TIMEOUT_S * std.time.ns_per_s;
 
-    while (!handshake_complete and (std.time.nanoTimestamp() - handshake_start) < handshake_timeout_ns) {
+    while (!handshake_complete and (sys.nanoTimestamp() - handshake_start) < handshake_timeout_ns) {
         // Fire ALL expired PTO timers (multiple spaces may expire simultaneously)
         {
             var ti: usize = 0;
@@ -351,7 +342,7 @@ fn downloadAll(
                 if (conn.state == .terminated or conn.state == .closing) break;
                 const next = conn.nextTimeoutNs();
                 if (next == null) break;
-                const now_check: i64 = @intCast(std.time.nanoTimestamp());
+                const now_check: i64 = sys.nanoTimestamp();
                 if (next.? > now_check) break;
             }
         }
@@ -364,7 +355,7 @@ fn downloadAll(
                 const bytes_written = conn.send(&out) catch break;
                 if (bytes_written == 0) break;
                 ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-                _ = posix.sendto(sockfd, out[0..bytes_written], 0, @ptrCast(&remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..bytes_written], 0, @ptrCast(&remote_addr), addr_size) catch {};
                 sent_any = true;
             }
         }
@@ -397,17 +388,17 @@ fn downloadAll(
                 const flush_bytes = conn.send(&out) catch break;
                 if (flush_bytes == 0) break;
                 ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-                _ = posix.sendto(sockfd, out[0..flush_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..flush_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
                 sent_any = true;
             }
         }
 
         // Only sleep when idle (nothing to send or receive)
-        if (!sent_any and !received_any) std.Thread.sleep(1 * std.time.ns_per_ms);
+        if (!sent_any and !received_any) sys.sleepNs(1 * std.time.ns_per_ms);
     }
 
     if (!handshake_complete) {
-        const elapsed_ms = @divTrunc(std.time.nanoTimestamp() - handshake_start, std.time.ns_per_ms);
+        const elapsed_ms = @divTrunc(sys.nanoTimestamp() - handshake_start, std.time.ns_per_ms);
         std.log.err("handshake failed after {d}ms", .{elapsed_ms});
         std.process.exit(1);
     }
@@ -418,7 +409,7 @@ fn downloadAll(
     const hs_bytes = conn.send(&out) catch 0;
     if (hs_bytes > 0) {
         ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-        _ = posix.sendto(sockfd, out[0..hs_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
+        _ = sys.sendto(sockfd, out[0..hs_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
     }
 
     // Sync remote_addr from active path (may have changed due to preferred_address migration)
@@ -436,12 +427,12 @@ fn downloadAll(
     if (!skip_ticket_and_drain and conn.session_ticket == null) {
         var ticket_iter: usize = 0;
         while (conn.session_ticket == null and ticket_iter < 200) : (ticket_iter += 1) {
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            sys.sleepNs(5 * std.time.ns_per_ms);
             conn.onTimeout() catch {};
             drainRecv(&conn, sockfd, local_addr, &remote_addr, &addr_size);
             const more = conn.send(&out) catch 0;
             if (more > 0) {
-                _ = posix.sendto(sockfd, out[0..more], 0, @ptrCast(&remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..more], 0, @ptrCast(&remote_addr), addr_size) catch {};
             }
         }
     }
@@ -453,19 +444,19 @@ fn downloadAll(
     conn.close(0, "done");
     const final_bytes = conn.send(&out) catch 0;
     if (final_bytes > 0) {
-        _ = posix.sendto(sockfd, out[0..final_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
+        _ = sys.sendto(sockfd, out[0..final_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
     }
 
     if (!skip_ticket_and_drain) {
         // Drain — brief drain to send CONNECTION_CLOSE, don't wait for full 3×PTO
         var drain_iter: usize = 0;
         while (!conn.isClosed() and drain_iter < 3) : (drain_iter += 1) {
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            sys.sleepNs(5 * std.time.ns_per_ms);
             conn.onTimeout() catch break;
             drainRecv(&conn, sockfd, local_addr, &remote_addr, &addr_size);
             const retransmit_bytes = conn.send(&out) catch 0;
             if (retransmit_bytes > 0) {
-                _ = posix.sendto(sockfd, out[0..retransmit_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..retransmit_bytes], 0, @ptrCast(&remote_addr), addr_size) catch {};
             }
         }
     }
@@ -489,7 +480,7 @@ fn downloadH0(
 ) !void {
     var sockfd = sockfd_param;
     var migrated_sockfd: ?posix.fd_t = null;
-    defer if (migrated_sockfd) |fd| posix.close(fd);
+    defer if (migrated_sockfd) |fd| sys.close(fd);
     var h0c = h0.H0Connection.init(alloc, conn, false);
     defer h0c.deinit();
 
@@ -538,7 +529,7 @@ fn downloadH0(
             const more = conn.send(&out) catch break;
             if (more == 0) break;
             ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-            _ = posix.sendto(sockfd, out[0..more], 0, @ptrCast(remote_addr), addr_size_ptr.*) catch break;
+            _ = sys.sendto(sockfd, out[0..more], 0, @ptrCast(remote_addr), addr_size_ptr.*) catch break;
         }
     }
 
@@ -548,10 +539,10 @@ fn downloadH0(
     var key_update_done = false;
     var migration_done = false;
     var h0_last_progress: usize = 0;
-    const download_start = std.time.nanoTimestamp();
+    const download_start = sys.nanoTimestamp();
     const download_timeout_ns: i128 = if (quick_mode) MULTICONNECT_DOWNLOAD_TIMEOUT_S * std.time.ns_per_s else DEFAULT_TIMEOUT_S * std.time.ns_per_s;
 
-    while (completed < urls.len and (std.time.nanoTimestamp() - download_start) < download_timeout_ns) {
+    while (completed < urls.len and (sys.nanoTimestamp() - download_start) < download_timeout_ns) {
         // Exit early if connection is dead
         if (conn.isClosed() or conn.isDraining()) {
             std.log.warn("H0: connection terminated during download, completed {d}/{d}", .{ completed, urls.len });
@@ -583,21 +574,21 @@ fn downloadH0(
                 });
             }
         }
-        if (packets_received == 0) std.Thread.sleep(1 * std.time.ns_per_ms);
+        if (packets_received == 0) sys.sleepNs(1 * std.time.ns_per_ms);
 
         // Connection migration: rebind to a new port after receiving some data
         if (do_migration and !migration_done and total_bytes_received > 100 * 1024) {
             // Switch DCID before migrating (RFC 9000 §9.5)
             if (conn.initiateClientMigration()) {
                 // Create a new socket bound to a different port
-                const new_sockfd = posix.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0) catch null;
+                const new_sockfd = sys.socket(posix.AF.INET6, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK, 0) catch null;
                 if (new_sockfd) |nfd| {
                     const IPV6_V6ONLY: u32 = if (@import("builtin").os.tag == .linux) 26 else 27;
                     const zero: c_int = 0;
                     posix.setsockopt(nfd, posix.IPPROTO.IPV6, IPV6_V6ONLY, std.mem.asBytes(&zero)) catch {};
                     const new_local = net.Address.parseIp6("::", 0) catch unreachable;
-                    posix.bind(nfd, &new_local.any, new_local.getOsSockLen()) catch {
-                        posix.close(nfd);
+                    sys.bind(nfd, &new_local.any, new_local.getOsSockLen()) catch {
+                        sys.close(nfd);
                     };
                     ecn_socket.enableEcnRecv(nfd) catch {};
                     migrated_sockfd = nfd;
@@ -627,7 +618,7 @@ fn downloadH0(
                 const ack_bytes = conn.send(&out) catch break;
                 if (ack_bytes == 0) break;
                 ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-                _ = posix.sendto(sockfd, out[0..ack_bytes], 0, @ptrCast(remote_addr), addr_size_ptr.*) catch {};
+                _ = sys.sendto(sockfd, out[0..ack_bytes], 0, @ptrCast(remote_addr), addr_size_ptr.*) catch {};
             }
         }
 
@@ -722,17 +713,17 @@ fn downloadH3(
         const more = conn.send(&out) catch break;
         if (more == 0) break;
         ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-        _ = posix.sendto(sockfd, out[0..more], 0, @ptrCast(remote_addr), addr_size) catch break;
+        _ = sys.sendto(sockfd, out[0..more], 0, @ptrCast(remote_addr), addr_size) catch break;
     }
 
     // Read responses — use time-based timeout (60s)
     var completed: usize = 0;
     var total_bytes_received: usize = 0;
     var key_update_done = false;
-    const h3_download_start = std.time.nanoTimestamp();
+    const h3_download_start = sys.nanoTimestamp();
     const h3_download_timeout_ns: i128 = 120 * std.time.ns_per_s;
 
-    while (completed < urls.len and (std.time.nanoTimestamp() - h3_download_start) < h3_download_timeout_ns) {
+    while (completed < urls.len and (sys.nanoTimestamp() - h3_download_start) < h3_download_timeout_ns) {
         // Exit early if connection is dead
         if (conn.isClosed() or conn.isDraining()) {
             std.log.warn("H3: connection terminated during download, completed {d}/{d}", .{ completed, urls.len });
@@ -755,7 +746,7 @@ fn downloadH3(
                 });
             }
         }
-        if (packets_received == 0) std.Thread.sleep(1 * std.time.ns_per_ms);
+        if (packets_received == 0) sys.sleepNs(1 * std.time.ns_per_ms);
 
         // Force key update after receiving some data (not too early, so in-flight
         // old-key packets don't confuse tshark's QUIC decryption)
@@ -776,7 +767,7 @@ fn downloadH3(
                 const ack_bytes = conn.send(&out) catch break;
                 if (ack_bytes == 0) break;
                 ecn_socket.setEcnMark(sockfd, conn.getEcnMark()) catch {};
-                _ = posix.sendto(sockfd, out[0..ack_bytes], 0, @ptrCast(remote_addr), addr_size) catch {};
+                _ = sys.sendto(sockfd, out[0..ack_bytes], 0, @ptrCast(remote_addr), addr_size) catch {};
             }
         }
 
@@ -832,7 +823,7 @@ fn saveFile(dir: []const u8, filename: []const u8, data: []const u8) !void {
     pos += filename.len;
 
     const path = path_buf[0..pos];
-    const file = try std.fs.cwd().createFile(path, .{});
+    const file = try sys.createFile(path);
     defer file.close();
     try file.writeAll(data);
     std.log.info("saved {s} ({d} bytes)", .{ path, data.len });

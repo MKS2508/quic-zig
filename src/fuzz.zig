@@ -12,6 +12,7 @@
 //   3. No out-of-bounds reads/writes (Zig safety checks in debug mode)
 
 const std = @import("std");
+const io_compat = @import("io_compat.zig");
 const testing = std.testing;
 
 const packet = @import("quic/packet.zig");
@@ -36,17 +37,18 @@ const tls13 = @import("quic/tls13.zig");
 
 test "fuzz: varint round-trip" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
-            var fbs = std.io.fixedBufferStream(input);
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
+            var fbs = io_compat.fixedBufferStream(input);
             const reader = fbs.reader();
             const val = packet.readVarInt(reader) catch return;
 
             // Round-trip: encode the parsed value and decode again
             var buf: [8]u8 = undefined;
-            var wfbs = std.io.fixedBufferStream(&buf);
+            var wfbs = io_compat.fixedBufferStream(&buf);
             packet.writeVarInt(wfbs.writer(), val) catch return;
 
-            var rfbs = std.io.fixedBufferStream(wfbs.getWritten());
+            var rfbs = io_compat.fixedBufferStream(wfbs.getWritten());
             const val2 = packet.readVarInt(rfbs.reader()) catch return;
             try testing.expectEqual(val, val2);
         }
@@ -63,13 +65,14 @@ test "fuzz: varint round-trip" {
 
 test "fuzz: packet header parse" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len == 0) return;
             // Header.parse takes a mutable fbs; we need a mutable copy
             var buf: [1536]u8 = undefined;
             const len = @min(input.len, buf.len);
             @memcpy(buf[0..len], input[0..len]);
-            var fbs = std.io.fixedBufferStream(buf[0..len]);
+            var fbs = io_compat.fixedBufferStream(buf[0..len]);
 
             // Try parsing with various short DCID lengths (0, 8, 20)
             for ([_]u8{ 0, 8, 20 }) |dcid_len| {
@@ -89,7 +92,8 @@ test "fuzz: packet header parse" {
 
 test "fuzz: frame parse" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len == 0) return;
             // Frame.parse takes []u8 (mutable)
             var buf: [4096]u8 = undefined;
@@ -109,12 +113,13 @@ test "fuzz: frame parse" {
 
 test "fuzz: transport params decode" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             const params = transport_params.TransportParams.decode(input) catch return;
 
             // Round-trip: encode and decode again
             var buf: [4096]u8 = undefined;
-            var wfbs = std.io.fixedBufferStream(&buf);
+            var wfbs = io_compat.fixedBufferStream(&buf);
             params.encode(wfbs.writer()) catch return;
 
             const params2 = transport_params.TransportParams.decode(wfbs.getWritten()) catch return;
@@ -139,7 +144,8 @@ test "fuzz: transport params decode" {
 
 test "fuzz: h3 frame parse" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len == 0) return;
             _ = h3_frame.parse(input) catch return;
         }
@@ -155,7 +161,8 @@ test "fuzz: h3 frame parse" {
 
 test "fuzz: qpack decode" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len < 2) return;
             var headers: [64]qpack.Header = undefined;
             _ = qpack.decodeHeaders(input, &headers) catch return;
@@ -172,7 +179,8 @@ test "fuzz: qpack decode" {
 
 test "fuzz: huffman decode" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             var out: [8192]u8 = undefined;
             const decoded_len = huffman.decode(input, &out) catch return;
 
@@ -199,14 +207,15 @@ test "fuzz: huffman decode" {
 
 test "fuzz: connection recv raw datagram" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len < 2) return;
 
             // Build a minimal header from the fuzzed input so we can call accept()
             var hdr_buf: [1536]u8 = undefined;
             const hdr_len = @min(input.len, hdr_buf.len);
             @memcpy(hdr_buf[0..hdr_len], input[0..hdr_len]);
-            var hdr_fbs = std.io.fixedBufferStream(hdr_buf[0..hdr_len]);
+            var hdr_fbs = io_compat.fixedBufferStream(hdr_buf[0..hdr_len]);
             const hdr = packet.Header.parse(&hdr_fbs, 8) catch return;
 
             const local_storage = std.mem.zeroes(std.posix.sockaddr.storage);
@@ -250,7 +259,8 @@ test "fuzz: connection recv raw datagram" {
 
 test "fuzz: rangeset operations" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len < 2) return;
             var rs = ranges.RangeSet.init(testing.allocator);
             defer rs.deinit();
@@ -300,7 +310,8 @@ test "fuzz: rangeset operations" {
 
 test "fuzz: tls pem parse" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             var cert_buf: [8192]u8 = undefined;
             _ = tls13.parsePemCert(input, &cert_buf) catch {};
 
@@ -320,7 +331,8 @@ test "fuzz: tls pem parse" {
 
 test "fuzz: capsule parse" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             // Try parsing a single capsule
             if (capsule.parse(input)) |result| {
                 // Verify consumed <= input length
@@ -349,17 +361,18 @@ test "fuzz: capsule parse" {
 
 test "fuzz: capsule round-trip" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len < 2) return;
 
             // Use first bytes as capsule type (varint), rest as value
-            var fbs = std.io.fixedBufferStream(input);
+            var fbs = io_compat.fixedBufferStream(input);
             const capsule_type = packet.readVarInt(fbs.reader()) catch return;
             const value = input[fbs.pos..];
 
             // Write capsule
             var buf: [4096]u8 = undefined;
-            var wfbs = std.io.fixedBufferStream(&buf);
+            var wfbs = io_compat.fixedBufferStream(&buf);
             capsule.write(wfbs.writer(), capsule_type, value) catch return;
 
             // Parse it back
@@ -380,7 +393,8 @@ test "fuzz: capsule round-trip" {
 
 test "fuzz: priority parse round-trip" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             // Parse priority from arbitrary bytes
             const p1 = priority.parse(input);
 
@@ -409,7 +423,8 @@ test "fuzz: priority parse round-trip" {
 
 test "fuzz: qpack encoder instructions" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len == 0) return;
             var decoder = qpack.QpackDecoder{};
             decoder.setCapacity(4096);
@@ -428,7 +443,8 @@ test "fuzz: qpack encoder instructions" {
 
 test "fuzz: qpack decoder instructions" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len == 0) return;
             var encoder = qpack.QpackEncoder{};
             encoder.processDecoderInstruction(input) catch return;
@@ -446,7 +462,8 @@ test "fuzz: qpack decoder instructions" {
 
 test "fuzz: qpack encode-decode round-trip" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len < 4) return;
 
             // Interpret input as name/value pairs: [name_len, name..., value_len, value...]
@@ -502,7 +519,8 @@ test "fuzz: qpack encode-decode round-trip" {
 
 test "fuzz: der key extraction" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             // Try EC private key extraction
             if (tls13.extractEcPrivateKey(input)) |key| {
                 // Key must be exactly 32 bytes
@@ -527,7 +545,8 @@ test "fuzz: der key extraction" {
 
 test "fuzz: frame sorter" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len < 3) return;
 
             var sorter = stream.FrameSorter.init(testing.allocator);
@@ -588,7 +607,8 @@ test "fuzz: frame sorter" {
 
 test "fuzz: frame round-trip" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len == 0) return;
 
             // Parse
@@ -599,7 +619,7 @@ test "fuzz: frame round-trip" {
 
             // Write
             var buf2: [4096]u8 = undefined;
-            var wfbs = std.io.fixedBufferStream(&buf2);
+            var wfbs = io_compat.fixedBufferStream(&buf2);
             f1.write(wfbs.writer()) catch return;
 
             // Parse again
@@ -628,7 +648,8 @@ test "fuzz: frame round-trip" {
 
 test "fuzz: coalesced packet headers" {
     try testing.fuzz({}, struct {
-        fn f(_: void, input: []const u8) anyerror!void {
+        fn f(_: void, smith: *std.testing.Smith) anyerror!void {
+            const input = smith.in orelse return;
             if (input.len < 2) return;
 
             var buf: [1536]u8 = undefined;
@@ -639,7 +660,7 @@ test "fuzz: coalesced packet headers" {
             var offset: usize = 0;
             var count: usize = 0;
             while (offset < len and count < 10) : (count += 1) {
-                var fbs = std.io.fixedBufferStream(buf[offset..len]);
+                var fbs = io_compat.fixedBufferStream(buf[offset..len]);
                 const hdr = packet.Header.parse(&fbs, 8) catch break;
 
                 // Advance past this packet

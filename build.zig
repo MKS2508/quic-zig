@@ -1,5 +1,8 @@
 const std = @import("std");
 
+// Zig 0.16 migration: in-progress Phase 2 — libxev now supports 0.16
+// (upstream commit a82a04eabb46). event_loop.zig is back on the library
+// surface; non-manual apps are being restored one canary at a time.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -10,7 +13,7 @@ pub fn build(b: *std.Build) void {
     // libxev dependency (used by event-loop-based servers)
     const xev_dep = b.dependency("libxev", .{ .target = target, .optimize = optimize });
 
-    // Library module — shared by all apps and exposed to downstream dependencies
+    // Library module — shared by all apps and exposed to downstream dependencies.
     const lib_mod = b.addModule("quic", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
@@ -18,21 +21,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = need_libc,
         .imports = &.{.{ .name = "xev", .module = xev_dep.module("xev") }},
     });
-
-    // C API shared library
-    const lib_shared = b.addLibrary(.{
-        .linkage = .dynamic,
-        .name = "quic-zig",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/c_api.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = need_libc,
-            .imports = &.{.{ .name = "quic", .module = lib_mod }},
-        }),
-    });
-    const lib_install = b.addInstallArtifact(lib_shared, .{});
-    b.step("lib", "Build C API shared library").dependOn(&lib_install.step);
 
     // Helper to build an app executable
     const App = struct {
@@ -58,14 +46,76 @@ pub fn build(b: *std.Build) void {
         }
     };
 
-    // Server
+    // Phase 1 apps: self-contained apps that manage their own socket
+    // + event loop (no libxev).
+    const exe_interop_client_manual = App.add(
+        b,
+        "interop-client-manual",
+        "apps/interop_client_manual.zig",
+        target,
+        optimize,
+        need_libc,
+        lib_mod,
+    );
+    b.installArtifact(exe_interop_client_manual);
+    const run_interop_client_manual = b.addRunArtifact(exe_interop_client_manual);
+    run_interop_client_manual.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_interop_client_manual.addArgs(args);
+    b.step("run-interop-client-manual", "Run interop runner client (manual event loop)")
+        .dependOn(&run_interop_client_manual.step);
+
+    const exe_interop_server_manual = App.add(
+        b,
+        "interop-server-manual",
+        "apps/interop_server_manual.zig",
+        target,
+        optimize,
+        need_libc,
+        lib_mod,
+    );
+    b.installArtifact(exe_interop_server_manual);
+    const run_interop_server_manual = b.addRunArtifact(exe_interop_server_manual);
+    run_interop_server_manual.step.dependOn(b.getInstallStep());
+    b.step("run-interop-server-manual", "Run interop runner server (manual event loop)")
+        .dependOn(&run_interop_server_manual.step);
+
+    const exe_wt_browser_server_manual = App.add(
+        b,
+        "wt-browser-server-manual",
+        "apps/wt_browser_server_manual.zig",
+        target,
+        optimize,
+        need_libc,
+        lib_mod,
+    );
+    b.installArtifact(exe_wt_browser_server_manual);
+    const run_wt_browser_server_manual = b.addRunArtifact(exe_wt_browser_server_manual);
+    run_wt_browser_server_manual.step.dependOn(b.getInstallStep());
+    b.step("run-wt-browser-server-manual", "Run WebTransport browser server (manual event loop)")
+        .dependOn(&run_wt_browser_server_manual.step);
+
+    // C API shared library
+    const lib_shared = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "quic-zig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_api.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = need_libc,
+            .imports = &.{.{ .name = "quic", .module = lib_mod }},
+        }),
+    });
+    const lib_install = b.addInstallArtifact(lib_shared, .{});
+    b.step("lib", "Build C API shared library").dependOn(&lib_install.step);
+
+    // ── Event-loop-based apps ─────────────────────────────────────────────
     const exe_server = App.add(b, "server", "apps/server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_server);
     const run_server = b.addRunArtifact(exe_server);
     run_server.step.dependOn(b.getInstallStep());
     b.step("run-server", "Run QUIC server").dependOn(&run_server.step);
 
-    // Client
     const exe_client = App.add(b, "client", "apps/client.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_client);
     const run_client = b.addRunArtifact(exe_client);
@@ -73,7 +123,6 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_client.addArgs(args);
     b.step("run-client", "Run QUIC client").dependOn(&run_client.step);
 
-    // H3 client (event_loop)
     const exe_h3_client = App.add(b, "h3-client", "apps/h3_client.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_h3_client);
     const run_h3_client = b.addRunArtifact(exe_h3_client);
@@ -81,14 +130,12 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_h3_client.addArgs(args);
     b.step("run-h3-client", "Run H3 client").dependOn(&run_h3_client.step);
 
-    // Raw QUIC server (event_loop)
     const exe_quic_server = App.add(b, "quic-server", "apps/quic_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_quic_server);
     const run_quic_server = b.addRunArtifact(exe_quic_server);
     run_quic_server.step.dependOn(b.getInstallStep());
     b.step("run-quic-server", "Run raw QUIC echo server").dependOn(&run_quic_server.step);
 
-    // Raw QUIC client (event_loop)
     const exe_quic_client = App.add(b, "quic-client", "apps/quic_client.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_quic_client);
     const run_quic_client = b.addRunArtifact(exe_quic_client);
@@ -96,28 +143,24 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_quic_client.addArgs(args);
     b.step("run-quic-client", "Run raw QUIC echo client").dependOn(&run_quic_client.step);
 
-    // WebTransport server
     const exe_wt_server = App.add(b, "wt-server", "apps/wt_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_wt_server);
     const run_wt_server = b.addRunArtifact(exe_wt_server);
     run_wt_server.step.dependOn(b.getInstallStep());
     b.step("run-wt-server", "Run WebTransport server").dependOn(&run_wt_server.step);
 
-    // WebTransport client
     const exe_wt_client = App.add(b, "wt-client", "apps/wt_client.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_wt_client);
     const run_wt_client = b.addRunArtifact(exe_wt_client);
     run_wt_client.step.dependOn(b.getInstallStep());
     b.step("run-wt-client", "Run WebTransport client").dependOn(&run_wt_client.step);
 
-    // WebTransport browser server
     const exe_wt_browser = App.add(b, "wt-browser-server", "apps/wt_browser_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_wt_browser);
     const run_wt_browser = b.addRunArtifact(exe_wt_browser);
     run_wt_browser.step.dependOn(b.getInstallStep());
     b.step("run-wt-browser-server", "Run WebTransport browser server").dependOn(&run_wt_browser.step);
 
-    // MoQ Transport relay
     const exe_moq_relay = App.add(b, "moq-relay", "apps/moq_relay.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_moq_relay);
     const run_moq_relay = b.addRunArtifact(exe_moq_relay);
@@ -125,7 +168,6 @@ pub fn build(b: *std.Build) void {
     if (b.args) |moq_args| run_moq_relay.addArgs(moq_args);
     b.step("run-moq-relay", "Run MoQ Transport relay").dependOn(&run_moq_relay.step);
 
-    // MoQ Transport server (raw QUIC)
     const exe_moq_server = App.add(b, "moq-server", "apps/moq_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_moq_server);
     const run_moq_server = b.addRunArtifact(exe_moq_server);
@@ -133,7 +175,6 @@ pub fn build(b: *std.Build) void {
     if (b.args) |moq_args| run_moq_server.addArgs(moq_args);
     b.step("run-moq-server", "Run MoQ Transport server (raw QUIC)").dependOn(&run_moq_server.step);
 
-    // MoQ Transport client (raw QUIC)
     const exe_moq_client = App.add(b, "moq-client", "apps/moq_client.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_moq_client);
     const run_moq_client = b.addRunArtifact(exe_moq_client);
@@ -141,7 +182,6 @@ pub fn build(b: *std.Build) void {
     if (b.args) |moq_args| run_moq_client.addArgs(moq_args);
     b.step("run-moq-client", "Run MoQ Transport client (raw QUIC)").dependOn(&run_moq_client.step);
 
-    // MoQ Transport browser demo server
     const exe_moq_browser = App.add(b, "moq-browser-server", "apps/moq_browser_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_moq_browser);
     const run_moq_browser = b.addRunArtifact(exe_moq_browser);
@@ -149,7 +189,6 @@ pub fn build(b: *std.Build) void {
     if (b.args) |moq_args| run_moq_browser.addArgs(moq_args);
     b.step("run-moq-browser-server", "Run MoQ Transport browser demo server").dependOn(&run_moq_browser.step);
 
-    // WebTransport echo server (production deployment)
     const exe_wt_echo = App.add(b, "wt-echo-server", "apps/wt_echo_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_wt_echo);
     const run_wt_echo = b.addRunArtifact(exe_wt_echo);
@@ -157,7 +196,6 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_wt_echo.addArgs(args);
     b.step("run-wt-echo-server", "Run WebTransport echo server").dependOn(&run_wt_echo.step);
 
-    // WPT (Web Platform Tests) WebTransport server
     const exe_wpt = App.add(b, "wpt-server", "apps/wpt_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_wpt);
     const run_wpt = b.addRunArtifact(exe_wpt);
@@ -165,14 +203,12 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_wpt.addArgs(args);
     b.step("run-wpt-server", "Run WPT WebTransport test server").dependOn(&run_wpt.step);
 
-    // Interop runner server
     const exe_interop_server = App.add(b, "interop-server", "apps/interop_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_interop_server);
     const run_interop_server = b.addRunArtifact(exe_interop_server);
     run_interop_server.step.dependOn(b.getInstallStep());
     b.step("run-interop-server", "Run interop runner server").dependOn(&run_interop_server.step);
 
-    // Interop runner client
     const exe_interop_client = App.add(b, "interop-client", "apps/interop_client.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_interop_client);
     const run_interop_client = b.addRunArtifact(exe_interop_client);
@@ -180,21 +216,18 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_interop_client.addArgs(args);
     b.step("run-interop-client", "Run interop runner client").dependOn(&run_interop_client.step);
 
-    // Interop runner WebTransport server
     const exe_interop_wt_server = App.add(b, "interop-wt-server", "apps/interop_wt_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_interop_wt_server);
     const run_interop_wt_server = b.addRunArtifact(exe_interop_wt_server);
     run_interop_wt_server.step.dependOn(b.getInstallStep());
     b.step("run-interop-wt-server", "Run interop runner WebTransport server").dependOn(&run_interop_wt_server.step);
 
-    // Interop runner WebTransport client
     const exe_interop_wt_client = App.add(b, "interop-wt-client", "apps/interop_wt_client.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_interop_wt_client);
     const run_interop_wt_client = b.addRunArtifact(exe_interop_wt_client);
     run_interop_wt_client.step.dependOn(b.getInstallStep());
     b.step("run-interop-wt-client", "Run interop runner WebTransport client").dependOn(&run_interop_wt_client.step);
 
-    // QUIC Load Balancer
     const exe_lb = App.add(b, "quic-lb", "apps/quic_lb.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_lb);
     const run_lb = b.addRunArtifact(exe_lb);
@@ -202,7 +235,6 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args_lb| run_lb.addArgs(args_lb);
     b.step("run-quic-lb", "Run QUIC load balancer").dependOn(&run_lb.step);
 
-    // Benchmark
     const exe_bench = App.add(b, "bench", "apps/bench.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_bench);
     const run_bench = b.addRunArtifact(exe_bench);
@@ -220,6 +252,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .link_libc = need_libc,
                 .imports = &.{
+                    .{ .name = "quic", .module = lib_mod },
                     .{ .name = "xev", .module = xev_dep.module("xev") },
                 },
             }),
@@ -237,7 +270,6 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = need_libc,
-            .imports = &.{.{ .name = "xev", .module = xev_dep.module("xev") }},
         }),
     });
     const run_tests = b.addRunArtifact(exe_tests);
@@ -250,7 +282,6 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = need_libc,
-            .imports = &.{.{ .name = "xev", .module = xev_dep.module("xev") }},
         }),
     });
     const run_fuzz = b.addRunArtifact(exe_fuzz);

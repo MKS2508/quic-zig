@@ -1,10 +1,10 @@
 const std = @import("std");
-const io = std.io;
+const io = @import("../io_compat.zig");
+const sys = @import("../sys.zig");
 const posix = std.posix;
 const log = std.log;
 const time = std.time;
 const assert = std.debug.assert;
-const random = std.crypto.random;
 // const tls = std.crypto.tls;
 
 const protocol = @import("protocol.zig");
@@ -606,7 +606,7 @@ pub fn parseQuicHeader(fbs: anytype, short_dcid_len: u8) !Header {
 }
 
 pub fn negotiateVersion(header: Header, writer: anytype) !void {
-    try writer.writeByte(random.int(u8) | LONG_HEADER_BIT);
+    try writer.writeByte(sys.randomInt(u8) | LONG_HEADER_BIT);
     try writer.writeInt(u32, 0, ENDIAN);
 
     try writer.writeByte(@intCast(header.scid.len));
@@ -622,7 +622,7 @@ pub fn negotiateVersion(header: Header, writer: anytype) !void {
     // RFC 9000 §6.3: Include a reserved version for greasing.
     // Reserved versions follow the pattern 0x?a?a?a?a.
     var grease_bytes: [2]u8 = undefined;
-    random.bytes(&grease_bytes);
+    sys.randomBytes(&grease_bytes);
     const grease_version: u32 = (@as(u32, grease_bytes[0] >> 4) << 28) | (0xa << 24) |
         (@as(u32, grease_bytes[0] & 0xf) << 20) | (0xa << 16) |
         (@as(u32, grease_bytes[1] >> 4) << 12) | (0xa << 8) |
@@ -729,7 +729,7 @@ pub fn generateRetryToken(
 
     // Generate random nonce
     var nonce: [TOKEN_NONCE_LEN]u8 = undefined;
-    random.bytes(&nonce);
+    sys.randomBytes(&nonce);
     @memcpy(out[0..TOKEN_NONCE_LEN], &nonce);
 
     // Build plaintext
@@ -740,7 +740,7 @@ pub fn generateRetryToken(
     try pt_writer.writeAll(odcid);
     try pt_writer.writeByte(@intCast(retry_scid.len));
     try pt_writer.writeAll(retry_scid);
-    const now: i64 = @intCast(time.nanoTimestamp());
+    const now: i64 = @intCast(sys.nanoTimestamp());
     try pt_writer.writeInt(i64, now, ENDIAN);
     // Write first 14 bytes of sockaddr.data (covers IPv4 port+addr)
     try pt_writer.writeAll(addrDataBytes(&client_addr));
@@ -825,7 +825,7 @@ pub fn validateRetryToken(
 
     // Read timestamp and check age
     const timestamp = pt_reader.readInt(i64, ENDIAN) catch return null;
-    const now: i64 = @intCast(time.nanoTimestamp());
+    const now: i64 = @intCast(sys.nanoTimestamp());
     if (now - timestamp > TOKEN_MAX_AGE_NS or timestamp > now) return null;
 
     // Check address
@@ -851,13 +851,13 @@ pub fn generateNewToken(
     if (out.len < NEW_TOKEN_MAX_LEN) return error.BufferTooSmall;
 
     var nonce: [TOKEN_NONCE_LEN]u8 = undefined;
-    random.bytes(&nonce);
+    sys.randomBytes(&nonce);
     @memcpy(out[0..TOKEN_NONCE_LEN], &nonce);
 
     var plaintext: [NEW_TOKEN_PLAINTEXT_LEN]u8 = undefined;
     var pt_fbs = io.fixedBufferStream(&plaintext);
     const pt_writer = pt_fbs.writer();
-    const now: i64 = @intCast(time.nanoTimestamp());
+    const now: i64 = @intCast(sys.nanoTimestamp());
     try pt_writer.writeInt(i64, now, ENDIAN);
     try pt_writer.writeAll(addrDataBytes(&client_addr));
 
@@ -903,7 +903,7 @@ pub fn validateNewToken(
     const pt_reader = pt_fbs.reader();
 
     const timestamp = pt_reader.readInt(i64, ENDIAN) catch return false;
-    const now: i64 = @intCast(time.nanoTimestamp());
+    const now: i64 = @intCast(sys.nanoTimestamp());
     if (now - timestamp > TOKEN_MAX_AGE_NS or timestamp > now) return false;
 
     var addr_data: [14]u8 = undefined;
@@ -1055,7 +1055,7 @@ fn decodePacketNumber(expected_pkt_num: u64, truncated_pkt_num: u64, num_bits: u
 // Retry token roundtrip test
 test "Retry token: generate and validate roundtrip" {
     var token_key: [crypto.key_len]u8 = undefined;
-    random.bytes(&token_key);
+    sys.randomBytes(&token_key);
 
     const odcid = &[_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
     const retry_scid = &[_]u8{ 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18 };
@@ -1082,7 +1082,7 @@ test "Retry token: generate and validate roundtrip" {
 // Retry token: wrong address should fail
 test "Retry token: wrong address rejected" {
     var token_key: [crypto.key_len]u8 = undefined;
-    random.bytes(&token_key);
+    sys.randomBytes(&token_key);
 
     const odcid = &[_]u8{ 0x01, 0x02, 0x03, 0x04 };
     const retry_scid = &[_]u8{ 0x11, 0x12, 0x13, 0x14 };
@@ -1104,7 +1104,7 @@ test "Retry token: wrong address rejected" {
 // Retry token: wrong key should fail
 test "Retry token: wrong key rejected" {
     var token_key: [crypto.key_len]u8 = undefined;
-    random.bytes(&token_key);
+    sys.randomBytes(&token_key);
 
     const odcid = &[_]u8{ 0x01, 0x02, 0x03, 0x04 };
     const retry_scid = &[_]u8{ 0x11, 0x12, 0x13, 0x14 };
@@ -1116,7 +1116,7 @@ test "Retry token: wrong key rejected" {
 
     // Different key
     var wrong_key: [crypto.key_len]u8 = undefined;
-    random.bytes(&wrong_key);
+    sys.randomBytes(&wrong_key);
     const validated = try validateRetryToken(out[0..token_len], addr, wrong_key);
     try std.testing.expect(validated == null);
 }

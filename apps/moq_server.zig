@@ -8,6 +8,8 @@
 
 const std = @import("std");
 const quic = @import("quic");
+const io_compat = @import("quic").io_compat;
+const sys = quic.sys;
 const event_loop = quic.event_loop;
 const tls13 = quic.tls13;
 
@@ -80,7 +82,7 @@ const MoqServerHandler = struct {
                 self.control_out = send_stream.stream_id;
 
                 var buf: [256]u8 = undefined;
-                var fbs = std.io.fixedBufferStream(&buf);
+                var fbs = io_compat.fixedBufferStream(&buf);
                 moq_msg.writeSetup(fbs.writer(), .{
                     .implementation = "quic-zig/moq-server",
                 }) catch return;
@@ -119,7 +121,7 @@ const MoqServerHandler = struct {
         const conn = session.entry.conn;
         const stream = conn.streams.getStream(stream_id) orelse return;
         var buf: [256]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
+        var fbs = io_compat.fixedBufferStream(&buf);
         moq_msg.writeSubscribeOk(fbs.writer(), .{
             .track_alias = alias,
         }) catch return;
@@ -148,7 +150,7 @@ const MoqServerHandler = struct {
             };
 
             var buf: [256]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&buf);
+            var fbs = io_compat.fixedBufferStream(&buf);
             const w = fbs.writer();
 
             moq_obj.writeSubgroupHeader(w, .{
@@ -179,7 +181,7 @@ const MoqServerHandler = struct {
         if (!self.setup_sent or !self.setup_received) return;
         if (self.subscriber_count == 0) return;
 
-        const now: i128 = std.time.nanoTimestamp();
+        const now: i128 = sys.nanoTimestamp();
         if (self.last_tick_ns == 0) self.last_tick_ns = now;
         if (now - self.last_tick_ns < 1_000_000_000) return;
         self.last_tick_ns = now;
@@ -188,7 +190,7 @@ const MoqServerHandler = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -197,7 +199,7 @@ pub fn main() !void {
     var cert_path: []const u8 = "interop/certs/server.crt";
     var key_path: []const u8 = "interop/certs/server.key";
 
-    var args = std.process.args();
+    var args = std.process.Args.Iterator.init(init.args);
     _ = args.next();
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
@@ -210,8 +212,8 @@ pub fn main() !void {
     }
 
     // Build TLS config with both "moqt-17" and "h3" ALPNs.
-    const server_cert_pem = try std.fs.cwd().readFileAlloc(alloc, cert_path, 8192);
-    const server_key_pem = try std.fs.cwd().readFileAlloc(alloc, key_path, 8192);
+    const server_cert_pem = try sys.readFileAlloc(alloc, cert_path, 8192);
+    const server_key_pem = try sys.readFileAlloc(alloc, key_path, 8192);
     const cert_chain = try tls13.parsePemCertChain(alloc, server_cert_pem);
     var key_der_buf: [4096]u8 = undefined;
     const key_der = try tls13.parsePemPrivateKey(server_key_pem, &key_der_buf);
@@ -222,7 +224,7 @@ pub fn main() !void {
     alpn[0] = moq_version.ALPN; // "moqt-17"
 
     var ticket_key: [16]u8 = undefined;
-    std.crypto.random.bytes(&ticket_key);
+    sys.randomBytes(&ticket_key);
 
     std.debug.print("\n=== MoQ Server (draft-17, raw QUIC) ===\n", .{});
     std.debug.print("Listening on 0.0.0.0:{d}  ALPN: {s}, h3\n\n", .{ port, moq_version.ALPN });

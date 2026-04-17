@@ -3,6 +3,7 @@
 // plaintext and encrypted (4-pass Feistel / single-pass AES-ECB) modes.
 
 const std = @import("std");
+const sys = @import("../sys.zig");
 const crypto = std.crypto;
 const Aes128 = crypto.core.aes.Aes128;
 
@@ -35,7 +36,7 @@ pub fn generateCid(config: *const Config, buf: []u8) void {
     } else {
         // Bits 4-0 are random
         var random_byte: [1]u8 = undefined;
-        crypto.random.bytes(&random_byte);
+        sys.randomBytes(&random_byte);
         buf[0] = config_bits | (random_byte[0] & 0x1F);
     }
 
@@ -45,7 +46,7 @@ pub fn generateCid(config: *const Config, buf: []u8) void {
     // Place server_id and nonce into bytes 1..total
     @memcpy(buf[1 .. 1 + sid_len], config.server_id[0..sid_len]);
     // Fill nonce with random bytes
-    crypto.random.bytes(buf[1 + sid_len .. total]);
+    sys.randomBytes(buf[1 + sid_len .. total]);
 
     // Encrypt if key is set
     if (config.key) |key| {
