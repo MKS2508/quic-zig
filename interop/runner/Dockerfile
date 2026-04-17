@@ -19,8 +19,10 @@ RUN mkdir -p /root/.cache/zig && \
     zig fetch --global-cache-dir /root/.cache/zig /tmp/libxev.tar.gz && \
     rm /tmp/libxev.tar.gz
 
-# Build interop binaries
-RUN zig build -Doptimize=ReleaseSafe --global-cache-dir /root/.cache/zig
+# Build interop binaries. `-j1` keeps peak RAM usage low (builds roll
+# through exe targets sequentially) so this works in tight CI/Docker
+# VMs — full parallel build of 25+ executables peaks around 12 GB.
+RUN zig build -Doptimize=ReleaseSafe --global-cache-dir /root/.cache/zig -j1
 
 # Stage 2: Runtime image based on quic-network-simulator endpoint
 FROM martenseemann/quic-network-simulator-endpoint:latest
