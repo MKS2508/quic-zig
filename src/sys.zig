@@ -744,14 +744,31 @@ pub fn readFileAlloc(
     const fd: fd_t = @intCast(fd_rc);
     defer closeFd(fd);
 
-    // Read in chunks; grow the buffer as needed up to max_bytes.
-    var buf = try gpa.alloc(u8, 4096);
+    // Stat first so we can size the buffer exactly. Falls back to streaming
+    // if stat fails (e.g. file is on a pipe/procfs and has no size).
+    var initial_size: usize = 4096;
+    {
+        const cur = c.lseek(fd, 0, std.c.SEEK.CUR);
+        const end = c.lseek(fd, 0, std.c.SEEK.END);
+        if (cur >= 0 and end >= 0) {
+            _ = c.lseek(fd, cur, std.c.SEEK.SET);
+            const size: usize = @intCast(end);
+            if (size > max_bytes) return error.StreamTooLong;
+            if (size > 0) initial_size = size;
+        }
+    }
+
+    var buf = try gpa.alloc(u8, initial_size);
     errdefer gpa.free(buf);
     var len: usize = 0;
     while (true) {
+        // Grow if the buffer is full. Read one extra byte past `max_bytes`
+        // on the final grow so we can distinguish "file is exactly
+        // max_bytes" (OK — read returns 0 next) from "file is bigger
+        // than max_bytes" (overflow — read returns > 0).
         if (len == buf.len) {
-            if (len >= max_bytes) return error.StreamTooLong;
-            const new_size = @min(buf.len * 2, max_bytes);
+            if (buf.len > max_bytes) return error.StreamTooLong;
+            const new_size = if (buf.len >= max_bytes) max_bytes + 1 else @min(buf.len * 2, max_bytes);
             buf = try gpa.realloc(buf, new_size);
         }
         const rc = c.read(fd, buf[len..].ptr, buf.len - len);
@@ -765,6 +782,7 @@ pub fn readFileAlloc(
         };
         if (rc == 0) break; // EOF
         len += @intCast(rc);
+        if (len > max_bytes) return error.StreamTooLong;
     }
     return gpa.realloc(buf, len);
 }
