@@ -286,7 +286,7 @@ conn.handleDatagram(buf[0..len], recv_info);
 
 ## Building
 
-Requires **Zig 0.15.2**.
+Requires **Zig 0.16.0**.
 
 ```bash
 zig build
