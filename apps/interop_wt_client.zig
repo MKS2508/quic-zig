@@ -225,12 +225,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         null;
     defer if (keylog_file) |f| f.close();
 
-    // Resolve server address
+    // Resolve server address (numeric IP fast path + getaddrinfo fallback).
     const host = urls.items[0].host;
     const port = urls.items[0].port;
-    const server_addr = net.Address.parseIp(host, port) catch |err| {
-        std.log.err("failed to parse {s}:{d}: {any}", .{ host, port, err });
-        return err;
+    const resolved_storage = blk: {
+        if (net.Address.parseIp(host, port)) |a| {
+            break :blk connection.sockaddrToStorage(&a.any);
+        } else |_| {}
+        break :blk sys.resolveHost(host, port) catch |err| {
+            std.log.err("failed to resolve {s}:{d}: {any}", .{ host, port, err });
+            return err;
+        };
     };
 
     // Create dual-stack UDP socket
@@ -266,7 +271,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }, tls_config, null);
     defer conn.deinit();
 
-    var remote_addr = connection.sockaddrToStorage(&server_addr.any);
+    var remote_addr = resolved_storage;
     ecn_socket.mapV4ToV6(&remote_addr);
     var addr_size: posix.socklen_t = connection.sockaddrLen(&remote_addr);
     var out: [MAX_DATAGRAM_SIZE]u8 = undefined;

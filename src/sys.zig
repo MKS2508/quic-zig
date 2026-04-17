@@ -313,6 +313,56 @@ pub fn listen(sock: socket_t, backlog: u31) ListenError!void {
     }
 }
 
+pub const ResolveError = error{
+    UnknownHostName,
+    PathTooLong,
+    Unexpected,
+};
+
+/// Resolve `host` (numeric IP or hostname) to an IPv4/IPv6 sockaddr via
+/// libc getaddrinfo. Replaces 0.15 `std.net.getAddressList` which is
+/// gone in 0.16. The returned address carries `port` in network byte
+/// order ready for `sys.bind`/`sys.sendto`.
+pub fn resolveHost(host: []const u8, port: u16) ResolveError!posix.sockaddr.storage {
+    switch (builtin.os.tag) {
+        .linux, .macos, .ios, .watchos, .tvos, .visionos, .freebsd, .netbsd, .openbsd, .dragonfly => {},
+        .windows => @compileError("sys.resolveHost: Windows support pending"),
+        else => @compileError("sys.resolveHost: unsupported OS"),
+    }
+    // Null-terminate host on the stack.
+    var host_buf: [256]u8 = undefined;
+    if (host.len >= host_buf.len) return error.PathTooLong;
+    @memcpy(host_buf[0..host.len], host);
+    host_buf[host.len] = 0;
+    const host_z: [*:0]const u8 = @ptrCast(&host_buf);
+
+    var port_buf: [8]u8 = undefined;
+    const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch return error.Unexpected;
+    if (port_str.len >= port_buf.len) return error.Unexpected;
+    port_buf[port_str.len] = 0;
+    const service_z: [*:0]const u8 = @ptrCast(&port_buf);
+
+    var hints: std.c.addrinfo = std.mem.zeroes(std.c.addrinfo);
+    hints.family = posix.AF.UNSPEC;
+    hints.socktype = posix.SOCK.DGRAM;
+
+    var res: ?*std.c.addrinfo = null;
+    const eai = std.c.getaddrinfo(host_z, service_z, &hints, &res);
+    if (eai != @as(std.c.EAI, @enumFromInt(0))) return error.UnknownHostName;
+    defer if (res) |r| std.c.freeaddrinfo(r);
+
+    const first = res orelse return error.UnknownHostName;
+    const addr_ptr = first.addr orelse return error.UnknownHostName;
+
+    var storage: posix.sockaddr.storage = std.mem.zeroes(posix.sockaddr.storage);
+    const copy_len = @min(@as(usize, first.addrlen), @sizeOf(posix.sockaddr.storage));
+    @memcpy(
+        @as([*]u8, @ptrCast(&storage))[0..copy_len],
+        @as([*]const u8, @ptrCast(addr_ptr))[0..copy_len],
+    );
+    return storage;
+}
+
 pub const AcceptError = error{
     WouldBlock,
     ConnectionAborted,

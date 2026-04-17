@@ -260,11 +260,17 @@ fn downloadAll(
     const host = urls[0].host;
     const port = urls[0].port;
 
-    // Numeric IP only; DNS fallback dropped during 0.16 port (std.net.getAddressList
-    // moved under std.Io.net.resolve which needs an Io instance).
-    const server_addr = net.Address.parseIp(host, port) catch |err| {
-        std.log.err("failed to parse {s}:{d}: {any}", .{ host, port, err });
-        return err;
+    // Resolve host → sockaddr. Try numeric-IP fast path first (same
+    // semantics as pre-0.16), then fall back to getaddrinfo via sys.resolveHost
+    // so the Docker interop runner's DNS names (e.g. "server4") keep working.
+    const resolved_storage = blk: {
+        if (net.Address.parseIp(host, port)) |a| {
+            break :blk connection.sockaddrToStorage(&a.any);
+        } else |_| {}
+        break :blk sys.resolveHost(host, port) catch |err| {
+            std.log.err("failed to resolve {s}:{d}: {any}", .{ host, port, err });
+            return err;
+        };
     };
 
     // Always create IPv6 dual-stack socket to support preferred_address migration across families.
@@ -298,8 +304,10 @@ fn downloadAll(
     var conn = try connection.connect(alloc, host, .{ .enable_v2 = enable_v2, .disable_pmtud = true, .qlog_dir = qlog_dir_param }, tls_config, null);
     defer conn.deinit();
 
-    var remote_addr = connection.sockaddrToStorage(&server_addr.any);
-    // Convert IPv4 to IPv4-mapped IPv6 for dual-stack socket compatibility
+    var remote_addr = resolved_storage;
+    // getaddrinfo returns the port in network byte order already, but in
+    // case we went through the numeric fast path setPort() already did that.
+    // Convert IPv4 to IPv4-mapped IPv6 for dual-stack socket compatibility.
     mapV4ToV6(&remote_addr);
     var addr_size: posix.socklen_t = connection.sockaddrLen(&remote_addr);
     var out: [MAX_DATAGRAM_SIZE]u8 = undefined;
