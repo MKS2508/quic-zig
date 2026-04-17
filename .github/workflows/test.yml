@@ -11,22 +11,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows dropped during Zig 0.16 port — src/sys.zig, net_compat, and
+        # the libxev dep have @compileError branches for Windows pending a
+        # proper Winsock implementation.
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Build
-        if: runner.os != 'Windows'
         run: zig build
 
       - name: Test
         run: zig build test
 
       - name: Fuzz (smoke test)
-        if: runner.os != 'Windows'
         run: zig build fuzz
