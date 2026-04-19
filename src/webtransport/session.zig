@@ -234,10 +234,10 @@ pub const WebTransportConnection = struct {
         // Write WT bidi stream type prefix
         var prefix_buf: [16]u8 = undefined;
         var fbs = io.fixedBufferStream(&prefix_buf);
-        const w = fbs.writer();
+        const w = &fbs;
         try packet.writeVarInt(w, WT_BIDI_STREAM_TYPE);
         try packet.writeVarInt(w, session_id);
-        try stream.send.writeData(fbs.getWritten());
+        try stream.send.writeData(fbs.buffered());
 
         try self.wt_bidi_streams.put(stream_id, session_id);
         return stream_id;
@@ -252,10 +252,10 @@ pub const WebTransportConnection = struct {
         // Write WT uni stream type prefix
         var prefix_buf: [16]u8 = undefined;
         var fbs = io.fixedBufferStream(&prefix_buf);
-        const w = fbs.writer();
+        const w = &fbs;
         try packet.writeVarInt(w, WT_UNI_STREAM_TYPE);
         try packet.writeVarInt(w, session_id);
-        try send_stream.writeData(fbs.getWritten());
+        try send_stream.writeData(fbs.buffered());
 
         try self.wt_uni_streams.put(stream_id, session_id);
         return stream_id;
@@ -304,10 +304,10 @@ pub const WebTransportConnection = struct {
         const quarter_id = session_id / 4;
         var dgram_buf: [quic_connection.DatagramQueue.MAX_DATAGRAM_SIZE]u8 = undefined;
         var fbs = io.fixedBufferStream(&dgram_buf);
-        const w = fbs.writer();
+        const w = &fbs;
         try packet.writeVarInt(w, quarter_id);
         try w.writeAll(data);
-        try self.quic.sendDatagram(fbs.getWritten());
+        try self.quic.sendDatagram(fbs.buffered());
     }
 
     /// Returns connection-level statistics (matches browser WebTransport.getStats()).
@@ -408,8 +408,8 @@ pub const WebTransportConnection = struct {
             h3_frame.write(.{ .close_webtransport_session = .{
                 .error_code = error_code,
                 .reason = truncated_reason,
-            } }, fbs.writer()) catch {};
-            stream.send.writeData(fbs.getWritten()) catch {};
+            } }, &fbs) catch {};
+            stream.send.writeData(fbs.buffered()) catch {};
             stream.send.close();
         }
 
@@ -436,8 +436,8 @@ pub const WebTransportConnection = struct {
         if (self.quic.streams.getStream(session_id)) |stream| {
             var frame_buf: [16]u8 = undefined;
             var fbs = io.fixedBufferStream(&frame_buf);
-            h3_frame.write(.{ .drain_webtransport_session = {} }, fbs.writer()) catch {};
-            stream.send.writeData(fbs.getWritten()) catch {};
+            h3_frame.write(.{ .drain_webtransport_session = {} }, &fbs) catch {};
+            stream.send.writeData(fbs.buffered()) catch {};
         }
     }
 
@@ -695,7 +695,7 @@ pub const WebTransportConnection = struct {
 
         // Parse quarter_stream_id
         var fbs = io.fixedBufferStream(self.dgram_poll_buf[0..dgram_len]);
-        const reader = fbs.reader();
+        const reader = &fbs;
         const quarter_id = packet.readVarInt(reader) catch return null;
         const session_id = quarter_id * 4;
 
@@ -730,7 +730,7 @@ pub const WebTransportConnection = struct {
             if (data.len == 0) continue;
 
             var fbs = io.fixedBufferStream(data);
-            const reader = fbs.reader();
+            const reader = &fbs;
             const stream_type = packet.readVarInt(reader) catch continue;
 
             if (stream_type == WT_UNI_STREAM_TYPE) {
@@ -773,22 +773,31 @@ pub const WebTransportConnection = struct {
         const highest = self.quic.streams.highest_peer_bidi_stream_id orelse return null;
         while (self.next_peer_bidi_to_examine <= highest) {
             const stream_id = self.next_peer_bidi_to_examine;
-            self.next_peer_bidi_to_examine += 4; // Next peer-initiated bidi ID
 
-            // Skip already-identified streams
-            if (self.wt_bidi_streams.contains(stream_id)) continue;
-            if (self.h3.finished_streams.contains(stream_id)) continue;
-            if (self.getSession(stream_id) != null) continue;
+            // Already-classified streams: advance past them.
+            if (self.wt_bidi_streams.contains(stream_id) or
+                self.h3.finished_streams.contains(stream_id) or
+                self.getSession(stream_id) != null)
+            {
+                self.next_peer_bidi_to_examine += 4;
+                continue;
+            }
 
-            const stream = self.quic.streams.getStream(stream_id) orelse continue;
+            const stream = self.quic.streams.getStream(stream_id) orelse break;
 
-            // Try to read prefix data (read() transfers ownership)
-            const data = stream.recv.read() orelse continue;
+            // Need prefix bytes to identify. If nothing readable yet (e.g. stream
+            // opened but first STREAM frame not yet contiguous at offset 0),
+            // defer — do NOT advance the cursor, or we'll skip the stream forever.
+            const data = stream.recv.read() orelse break;
             defer self.allocator.free(data);
+
+            // Prefix bytes arrived: commit the advance.
+            self.next_peer_bidi_to_examine += 4;
+
             if (data.len == 0) continue;
 
             var fbs = io.fixedBufferStream(data);
-            const reader = fbs.reader();
+            const reader = &fbs;
             const stream_type = packet.readVarInt(reader) catch continue;
 
             if (stream_type == WT_BIDI_STREAM_TYPE) {
@@ -1090,13 +1099,13 @@ fn createTestQuicConn(is_server: bool) quic_connection.Connection {
 // Build control stream type byte + WT-enabled SETTINGS
 fn buildWtControlPayload(buf: []u8) usize {
     var fbs = io.fixedBufferStream(buf);
-    h3_frame.writeUniStreamType(fbs.writer(), .control) catch unreachable;
+    h3_frame.writeUniStreamType(&fbs, .control) catch unreachable;
     h3_frame.write(.{ .settings = .{
         .enable_connect_protocol = true,
         .h3_datagram = true,
         .enable_webtransport = true,
         .webtransport_max_sessions = 4,
-    } }, fbs.writer()) catch unreachable;
+    } }, &fbs) catch unreachable;
     return fbs.seek;
 }
 
@@ -1127,7 +1136,7 @@ fn buildConnectRequest(buf: []u8, path: []const u8) usize {
     var qpack_buf: [256]u8 = undefined;
     const qpack_len = qpack.encodeHeaders(&headers, &qpack_buf) catch unreachable;
     var fbs = io.fixedBufferStream(buf);
-    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer()) catch unreachable;
+    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs) catch unreachable;
     return fbs.seek;
 }
 
@@ -1139,14 +1148,14 @@ fn buildConnectResponse(buf: []u8) usize {
     var qpack_buf: [256]u8 = undefined;
     const qpack_len = qpack.encodeHeaders(&headers, &qpack_buf) catch unreachable;
     var fbs = io.fixedBufferStream(buf);
-    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer()) catch unreachable;
+    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs) catch unreachable;
     return fbs.seek;
 }
 
 // Build WT bidi stream type prefix: 0x41 + session_id
 fn buildWtBidiPrefix(buf: []u8, session_id: u64) usize {
     var fbs = io.fixedBufferStream(buf);
-    const w = fbs.writer();
+    const w = &fbs;
     packet.writeVarInt(w, WT_BIDI_STREAM_TYPE) catch unreachable;
     packet.writeVarInt(w, session_id) catch unreachable;
     return fbs.seek;
@@ -1155,7 +1164,7 @@ fn buildWtBidiPrefix(buf: []u8, session_id: u64) usize {
 // Build WT uni stream type prefix: 0x54 + session_id
 fn buildWtUniPrefix(buf: []u8, session_id: u64) usize {
     var fbs = io.fixedBufferStream(buf);
-    const w = fbs.writer();
+    const w = &fbs;
     packet.writeVarInt(w, WT_UNI_STREAM_TYPE) catch unreachable;
     packet.writeVarInt(w, session_id) catch unreachable;
     return fbs.seek;
@@ -1324,7 +1333,7 @@ test "WT integration: openBidiStream writes type prefix" {
     try testing.expect(stream.send.write_buffer.items.len >= 2);
     // Parse the prefix
     var fbs = io.fixedBufferStream(stream.send.write_buffer.items);
-    const reader = fbs.reader();
+    const reader = &fbs;
     const stream_type = packet.readVarInt(reader) catch unreachable;
     try testing.expectEqual(WT_BIDI_STREAM_TYPE, stream_type);
     const sid = packet.readVarInt(reader) catch unreachable;
@@ -1345,7 +1354,7 @@ test "WT integration: openUniStream writes type prefix" {
     // Write buffer should contain WT uni prefix: 0x54 + session_id
     try testing.expect(send_stream.write_buffer.items.len >= 2);
     var fbs = io.fixedBufferStream(send_stream.write_buffer.items);
-    const reader = fbs.reader();
+    const reader = &fbs;
     const stream_type = packet.readVarInt(reader) catch unreachable;
     try testing.expectEqual(WT_UNI_STREAM_TYPE, stream_type);
     const sid = packet.readVarInt(reader) catch unreachable;
@@ -1547,7 +1556,7 @@ test "WT integration: sendDatagram writes quarter_stream_id + payload" {
 
     // Parse quarter_stream_id
     var fbs = io.fixedBufferStream(dgram_buf[0..dgram_len]);
-    const quarter_id = packet.readVarInt(fbs.reader()) catch unreachable;
+    const quarter_id = packet.readVarInt(&fbs) catch unreachable;
     try testing.expectEqual(session_id / 4, quarter_id);
     // Rest is payload
     try testing.expectEqualStrings("dgram payload", dgram_buf[fbs.seek..dgram_len]);
@@ -1562,8 +1571,8 @@ test "WT integration: poll receives datagram demuxed by session" {
     const quarter_id = session_id / 4;
     var dgram_buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&dgram_buf);
-    packet.writeVarInt(fbs.writer(), quarter_id) catch unreachable;
-    fbs.writer().writeAll("hello dgram") catch unreachable;
+    packet.writeVarInt(&fbs, quarter_id) catch unreachable;
+    fbs.writeAll("hello dgram") catch unreachable;
     try testing.expect(setup.quic_conn.datagram_recv_queue.push(dgram_buf[0..fbs.seek]));
 
     const ev = try setup.wt.poll();
@@ -1640,11 +1649,11 @@ test "WT integration: client receives session_rejected on non-200" {
     const qpack_len = qpack.encodeHeaders(&resp_headers, &qpack_buf) catch unreachable;
     var frame_buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&frame_buf);
-    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer()) catch unreachable;
+    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs) catch unreachable;
 
     const stream = quic_conn.streams.getStream(session_id).?;
     const offset = stream.recv.sorter.highestReceived();
-    try stream.recv.handleStreamFrame(offset, fbs.getWritten(), false);
+    try stream.recv.handleStreamFrame(offset, fbs.buffered(), false);
 
     const ev = try wt.poll();
     try testing.expect(ev != null);
@@ -1695,11 +1704,11 @@ test "WT integration: receiving CLOSE_WEBTRANSPORT_SESSION produces session_clos
     h3_frame.write(.{ .close_webtransport_session = .{
         .error_code = 7,
         .reason = "goodbye",
-    } }, fbs.writer()) catch unreachable;
+    } }, &fbs) catch unreachable;
 
     const stream = setup.quic_conn.streams.getStream(session_id).?;
     const offset = stream.recv.sorter.highestReceived();
-    try stream.recv.handleStreamFrame(offset, fbs.getWritten(), false);
+    try stream.recv.handleStreamFrame(offset, fbs.buffered(), false);
 
     const ev = try setup.wt.poll();
     try testing.expect(ev != null);
@@ -1988,11 +1997,11 @@ test "WT: receiving DRAIN_WEBTRANSPORT_SESSION produces session_draining event" 
     // Inject DRAIN capsule on the CONNECT stream
     var frame_buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&frame_buf);
-    h3_frame.write(.{ .drain_webtransport_session = {} }, fbs.writer()) catch unreachable;
+    h3_frame.write(.{ .drain_webtransport_session = {} }, &fbs) catch unreachable;
 
     const stream = setup.quic_conn.streams.getStream(session_id).?;
     const offset = stream.recv.sorter.highestReceived();
-    try stream.recv.handleStreamFrame(offset, fbs.getWritten(), false);
+    try stream.recv.handleStreamFrame(offset, fbs.buffered(), false);
 
     const ev = try setup.wt.poll();
     try testing.expect(ev != null);
@@ -2055,11 +2064,11 @@ test "WT: invalid session ID triggers H3_ID_ERROR on bidi stream" {
     // Inject WT bidi prefix with an odd session ID (invalid — must be client-initiated bidi = 4*n)
     var prefix_buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&prefix_buf);
-    packet.writeVarInt(fbs.writer(), WT_BIDI_STREAM_TYPE) catch unreachable;
-    packet.writeVarInt(fbs.writer(), 1) catch unreachable; // Invalid: not divisible by 4
+    packet.writeVarInt(&fbs, WT_BIDI_STREAM_TYPE) catch unreachable;
+    packet.writeVarInt(&fbs, 1) catch unreachable; // Invalid: not divisible by 4
 
     const stream = try setup.quic_conn.streams.getOrCreateStream(4);
-    try stream.recv.handleStreamFrame(0, fbs.getWritten(), false);
+    try stream.recv.handleStreamFrame(0, fbs.buffered(), false);
 
     const ev = try setup.wt.poll();
     // Should return null (connection closed with H3_ID_ERROR)
@@ -2076,11 +2085,11 @@ test "WT: uni stream to unknown session gets BUFFERED_STREAM_REJECTED" {
     // Inject WT uni prefix referencing non-existent session 8
     var prefix_buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&prefix_buf);
-    packet.writeVarInt(fbs.writer(), WT_UNI_STREAM_TYPE) catch unreachable;
-    packet.writeVarInt(fbs.writer(), 8) catch unreachable; // Valid format but session doesn't exist
+    packet.writeVarInt(&fbs, WT_UNI_STREAM_TYPE) catch unreachable;
+    packet.writeVarInt(&fbs, 8) catch unreachable; // Valid format but session doesn't exist
 
     const rs = try setup.quic_conn.streams.getOrCreateRecvStream(14);
-    try rs.handleStreamFrame(0, fbs.getWritten(), false);
+    try rs.handleStreamFrame(0, fbs.buffered(), false);
 
     const ev = try setup.wt.poll();
     // Stream is registered even for unknown sessions (may arrive before CONNECT)
@@ -2097,8 +2106,8 @@ test "WT: uni stream to unknown session gets BUFFERED_STREAM_REJECTED" {
 test "H3Frame: write and parse DRAIN_WEBTRANSPORT_SESSION" {
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try h3_frame.write(.{ .drain_webtransport_session = {} }, fbs.writer());
-    const written = fbs.getWritten();
+    try h3_frame.write(.{ .drain_webtransport_session = {} }, &fbs);
+    const written = fbs.buffered();
     try testing.expect(written.len > 0);
 
     const result = try h3_frame.parse(written);

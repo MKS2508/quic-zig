@@ -227,7 +227,7 @@ const RelayHandler = struct {
 
             var setup_buf: [256]u8 = undefined;
             var fbs = io_compat.fixedBufferStream(&setup_buf);
-            moq_msg.writeSetup(fbs.writer(), .{
+            moq_msg.writeSetup(&fbs, .{
                 .implementation = "quic-zig/moq-relay",
             }) catch return;
             ctrl.writeData(setup_buf[0..fbs.seek]) catch return;
@@ -262,7 +262,7 @@ const RelayHandler = struct {
     fn handleSubscribeNamespace(self: *RelayHandler, ci: usize, stream_id: u64, payload: []const u8) void {
         // Parse prefix tuple from payload.
         var fbs = io_compat.fixedBufferStream(payload);
-        const reader = fbs.reader();
+        const reader = &fbs;
         // request_id + delta (draft-17 request messages start with these).
         _ = moq_wire.readVarInt(reader) catch return; // request_id
         _ = moq_wire.readVarInt(reader) catch return; // required_request_id_delta
@@ -284,7 +284,7 @@ const RelayHandler = struct {
         // Reply REQUEST_OK on the same bidi stream.
         var buf: [64]u8 = undefined;
         var ok_fbs = io_compat.fixedBufferStream(&buf);
-        moq_msg.writeRequestOk(ok_fbs.writer(), .{}) catch return;
+        moq_msg.writeRequestOk(&ok_fbs, .{}) catch return;
         stream.send.writeData(buf[0..ok_fbs.seek]) catch return;
 
         // Push NAMESPACE for each currently-known track whose namespace
@@ -318,7 +318,7 @@ const RelayHandler = struct {
 
         var buf: [512]u8 = undefined;
         var ns_fbs = io_compat.fixedBufferStream(&buf);
-        try moq_msg.writeNamespace(ns_fbs.writer(), .{ .track_namespace = parts_buf[0..n_parts] });
+        try moq_msg.writeNamespace(&ns_fbs, .{ .track_namespace = parts_buf[0..n_parts] });
         try stream.send.writeData(buf[0..ns_fbs.seek]);
     }
 
@@ -331,7 +331,7 @@ const RelayHandler = struct {
 
         var buf: [64]u8 = undefined;
         var ok_fbs = io_compat.fixedBufferStream(&buf);
-        moq_msg.writeRequestOk(ok_fbs.writer(), .{}) catch return;
+        moq_msg.writeRequestOk(&ok_fbs, .{}) catch return;
         stream.send.writeData(buf[0..ok_fbs.seek]) catch return;
         std.debug.print("[relay] sent REQUEST_OK for publish_namespace\n", .{});
     }
@@ -375,7 +375,7 @@ const RelayHandler = struct {
             const stream = conn.streams.getStream(stream_id) orelse return;
             var buf: [256]u8 = undefined;
             var fbs = io_compat.fixedBufferStream(&buf);
-            moq_msg.writeSubscribeOk(fbs.writer(), .{ .track_alias = alias }) catch return;
+            moq_msg.writeSubscribeOk(&fbs, .{ .track_alias = alias }) catch return;
             stream.send.writeData(buf[0..fbs.seek]) catch return;
 
             std.debug.print("[relay] SUBSCRIBE_OK to client {d} alias={d} (track {d}, {d} subs)\n", .{
@@ -404,7 +404,7 @@ const RelayHandler = struct {
 
         var buf: [256]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
-        const w = fbs.writer();
+        const w = &fbs;
         moq_obj.writeSubgroupHeader(w, .{
             .track_alias = sub_alias,
             .group = self.group_id,
@@ -453,7 +453,7 @@ const RelayHandler = struct {
         const stream = conn.streams.getStream(stream_id) orelse return;
         var buf: [256]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
-        moq_msg.writePublishOk(fbs.writer(), .{}) catch return;
+        moq_msg.writePublishOk(&fbs, .{}) catch return;
         stream.send.writeData(buf[0..fbs.seek]) catch return;
 
         std.debug.print("[relay] PUBLISH_OK to client {d} (track {d})\n", .{ ci, ti });
@@ -491,7 +491,7 @@ const RelayHandler = struct {
             // Rewrite the subgroup header with the subscriber's alias.
             var out_buf: [512]u8 = undefined;
             var out_fbs = io_compat.fixedBufferStream(&out_buf);
-            const w = out_fbs.writer();
+            const w = &out_fbs;
 
             moq_obj.writeSubgroupHeader(w, .{
                 .track_alias = sub_alias,
@@ -531,7 +531,7 @@ const RelayHandler = struct {
 
                 var buf: [128]u8 = undefined;
                 var fbs = io_compat.fixedBufferStream(&buf);
-                moq_msg.writePublishDone(fbs.writer(), .{
+                moq_msg.writePublishDone(&fbs, .{
                     .status_code = 1, // producer disconnected
                     .reason = "publisher disconnected",
                 }) catch continue;
@@ -577,7 +577,7 @@ const RelayHandler = struct {
 
         var buf: [256]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
-        const w = fbs.writer();
+        const w = &fbs;
         moq_obj.writeSubgroupHeader(w, .{
             .track_alias = sub_alias,
             .group = group_id,

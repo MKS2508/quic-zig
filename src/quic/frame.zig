@@ -196,7 +196,7 @@ pub const Frame = union(FrameType) {
     /// the stream position.
     pub fn parse(bytes: []u8) !Frame {
         var stream = io.fixedBufferStream(bytes);
-        var reader = stream.reader();
+        var reader = &stream;
 
         const frame_type = try packet.readVarInt(reader);
 
@@ -207,7 +207,7 @@ pub const Frame = union(FrameType) {
                     var len: usize = 1;
 
                     while (stream.seek < bytes.len) {
-                        if (try reader.readByte() != 0x00) {
+                        if (try reader.takeByte() != 0x00) {
                             break;
                         }
                         len += 1;
@@ -399,7 +399,7 @@ pub const Frame = union(FrameType) {
                         .seq_num = try packet.readVarInt(reader),
                         .retire_prior_to = try packet.readVarInt(reader),
                         .conn_id = blk: {
-                            conn_id_len = try reader.readByte();
+                            conn_id_len = try reader.takeByte();
 
                             if (conn_id_len < 1 or conn_id_len > 20) {
                                 return error.FrameEncodingError;
@@ -410,7 +410,7 @@ pub const Frame = union(FrameType) {
 
                             break :blk conn_id;
                         },
-                        .stateless_reset_token = try reader.readBytesNoEof(16),
+                        .stateless_reset_token = (try reader.takeArray(16)).*,
                     },
                 };
             },
@@ -424,12 +424,12 @@ pub const Frame = union(FrameType) {
 
             // path challenge
             0x1a => .{
-                .path_challenge = try reader.readBytesNoEof(8),
+                .path_challenge = (try reader.takeArray(8)).*,
             },
 
             // path response
             0x1b => .{
-                .path_response = try reader.readBytesNoEof(8),
+                .path_response = (try reader.takeArray(8)).*,
             },
 
             // connection close
@@ -1207,8 +1207,8 @@ test "write and parse ping frame roundtrip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
     const frame = Frame{ .ping = {} };
-    try frame.write(fbs.writer());
-    const written = fbs.getWritten();
+    try frame.write(&fbs);
+    const written = fbs.buffered();
     var written_mut: [64]u8 = undefined;
     @memcpy(written_mut[0..written.len], written);
     const parsed = try Frame.parse(written_mut[0..written.len]);
@@ -1219,8 +1219,8 @@ test "write and parse max_data frame roundtrip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
     const frame = Frame{ .max_data = 999999 };
-    try frame.write(fbs.writer());
-    const written = fbs.getWritten();
+    try frame.write(&fbs);
+    const written = fbs.buffered();
     var written_mut: [64]u8 = undefined;
     @memcpy(written_mut[0..written.len], written);
     const parsed = try Frame.parse(written_mut[0..written.len]);
@@ -1234,8 +1234,8 @@ test "PendingControlFrame: max_streams_bidi write and parse roundtrip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
     const pcf = PendingControlFrame{ .max_streams_bidi = 42 };
-    try pcf.write(fbs.writer());
-    const written = fbs.getWritten();
+    try pcf.write(&fbs);
+    const written = fbs.buffered();
     var written_mut: [64]u8 = undefined;
     @memcpy(written_mut[0..written.len], written);
     const parsed = try Frame.parse(written_mut[0..written.len]);
@@ -1249,8 +1249,8 @@ test "PendingControlFrame: max_streams_uni write and parse roundtrip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
     const pcf = PendingControlFrame{ .max_streams_uni = 100 };
-    try pcf.write(fbs.writer());
-    const written = fbs.getWritten();
+    try pcf.write(&fbs);
+    const written = fbs.buffered();
     var written_mut: [64]u8 = undefined;
     @memcpy(written_mut[0..written.len], written);
     const parsed = try Frame.parse(written_mut[0..written.len]);
@@ -1264,8 +1264,8 @@ test "PendingControlFrame: streams_blocked_bidi write and parse roundtrip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
     const pcf = PendingControlFrame{ .streams_blocked_bidi = 7 };
-    try pcf.write(fbs.writer());
-    const written = fbs.getWritten();
+    try pcf.write(&fbs);
+    const written = fbs.buffered();
     var written_mut: [64]u8 = undefined;
     @memcpy(written_mut[0..written.len], written);
     const parsed = try Frame.parse(written_mut[0..written.len]);
@@ -1279,8 +1279,8 @@ test "PendingControlFrame: streams_blocked_uni write and parse roundtrip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
     const pcf = PendingControlFrame{ .streams_blocked_uni = 3 };
-    try pcf.write(fbs.writer());
-    const written = fbs.getWritten();
+    try pcf.write(&fbs);
+    const written = fbs.buffered();
     var written_mut: [64]u8 = undefined;
     @memcpy(written_mut[0..written.len], written);
     const parsed = try Frame.parse(written_mut[0..written.len]);

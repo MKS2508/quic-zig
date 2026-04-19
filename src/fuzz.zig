@@ -40,16 +40,16 @@ test "fuzz: varint round-trip" {
         fn f(_: void, smith: *std.testing.Smith) anyerror!void {
             const input = smith.in orelse return;
             var fbs = io_compat.fixedBufferStream(input);
-            const reader = fbs.reader();
+            const reader = &fbs;
             const val = packet.readVarInt(reader) catch return;
 
             // Round-trip: encode the parsed value and decode again
             var buf: [8]u8 = undefined;
             var wfbs = io_compat.fixedBufferStream(&buf);
-            packet.writeVarInt(wfbs.writer(), val) catch return;
+            packet.writeVarInt(&wfbs, val) catch return;
 
-            var rfbs = io_compat.fixedBufferStream(wfbs.getWritten());
-            const val2 = packet.readVarInt(rfbs.reader()) catch return;
+            var rfbs = io_compat.fixedBufferStream(wfbs.buffered());
+            const val2 = packet.readVarInt(&rfbs) catch return;
             try testing.expectEqual(val, val2);
         }
     }.f, .{});
@@ -120,9 +120,9 @@ test "fuzz: transport params decode" {
             // Round-trip: encode and decode again
             var buf: [4096]u8 = undefined;
             var wfbs = io_compat.fixedBufferStream(&buf);
-            params.encode(wfbs.writer()) catch return;
+            params.encode(&wfbs) catch return;
 
-            const params2 = transport_params.TransportParams.decode(wfbs.getWritten()) catch return;
+            const params2 = transport_params.TransportParams.decode(wfbs.buffered()) catch return;
 
             // Verify key fields match
             try testing.expectEqual(params.initial_max_data, params2.initial_max_data);
@@ -367,16 +367,16 @@ test "fuzz: capsule round-trip" {
 
             // Use first bytes as capsule type (varint), rest as value
             var fbs = io_compat.fixedBufferStream(input);
-            const capsule_type = packet.readVarInt(fbs.reader()) catch return;
+            const capsule_type = packet.readVarInt(&fbs) catch return;
             const value = input[fbs.seek..];
 
             // Write capsule
             var buf: [4096]u8 = undefined;
             var wfbs = io_compat.fixedBufferStream(&buf);
-            capsule.write(wfbs.writer(), capsule_type, value) catch return;
+            capsule.write(&wfbs, capsule_type, value) catch return;
 
             // Parse it back
-            const result = capsule.parse(wfbs.getWritten()) catch return;
+            const result = capsule.parse(wfbs.buffered()) catch return;
             try testing.expectEqual(capsule_type, result.capsule.capsule_type);
             try testing.expectEqualSlices(u8, value, result.capsule.value);
         }
@@ -620,10 +620,10 @@ test "fuzz: frame round-trip" {
             // Write
             var buf2: [4096]u8 = undefined;
             var wfbs = io_compat.fixedBufferStream(&buf2);
-            f1.write(wfbs.writer()) catch return;
+            f1.write(&wfbs) catch return;
 
             // Parse again
-            const written = wfbs.getWritten();
+            const written = wfbs.buffered();
             var buf3: [4096]u8 = undefined;
             @memcpy(buf3[0..written.len], written);
             const f2 = frame.Frame.parse(buf3[0..written.len]) catch return;

@@ -174,7 +174,7 @@ pub fn readVarBytesInto(reader: anytype, buf: []u8) ![]u8 {
 
 // For zero-copy decoding off a FixedBufferStream.
 pub fn readVarBytesZc(fbs: *io.FixedBufferStream([]const u8)) ![]const u8 {
-    const len_u64 = try readVarInt(fbs.reader());
+    const len_u64 = try readVarInt(fbs);
     const len = @as(usize, @intCast(len_u64));
     if (fbs.seek + len > fbs.buffer.len) return Error.BufferTooShort;
     const slice = fbs.buffer[fbs.seek .. fbs.seek + len];
@@ -234,7 +234,7 @@ pub const KvIterator = struct {
 
     pub fn next(self: *KvIterator) !?KvEntry {
         if (self.fbs.seek >= self.fbs.buffer.len) return null;
-        const delta = try readVarInt(self.fbs.reader());
+        const delta = try readVarInt(&self.fbs);
         const key = if (self.first) delta else blk: {
             const sum = std.math.add(u64, self.prev, delta) catch
                 return Error.DeltaOverflow;
@@ -244,7 +244,7 @@ pub const KvIterator = struct {
         self.prev = key;
 
         const value: KvValue = if ((key & 1) == 0)
-            .{ .varint = try readVarInt(&self.fbs.reader()) }
+            .{ .varint = try readVarInt(&self.fbs) }
         else blk: {
             const bytes = try readVarBytesZc(&self.fbs);
             if (bytes.len > std.math.maxInt(u16)) return Error.ValueTooLong;
@@ -294,11 +294,11 @@ test "varint round-trip at each length boundary" {
     for (cases) |v| {
         var buf: [16]u8 = undefined;
         var fbs = io.fixedBufferStream(&buf);
-        try writeVarInt(fbs.writer(), v);
+        try writeVarInt(&fbs, v);
         const written = fbs.seek;
         try testing.expectEqual(varIntLength(v), written);
         fbs.seek = 0;
-        const got = try readVarInt(fbs.reader());
+        const got = try readVarInt(&fbs);
         try testing.expectEqual(v, got);
     }
 }
@@ -308,7 +308,7 @@ test "varint rejects 7-byte encoding" {
     for ([_]u8{ 0xFC, 0xFD }) |first| {
         var buf = [_]u8{ first, 0, 0, 0, 0, 0, 0 };
         var fbs = io.fixedBufferStream(@as([]const u8, &buf));
-        try testing.expectError(Error.InvalidVarInt, readVarInt(fbs.reader()));
+        try testing.expectError(Error.InvalidVarInt, readVarInt(&fbs));
     }
 }
 
@@ -328,9 +328,9 @@ test "varint length table" {
 test "varbytes round-trip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try writeVarBytes(fbs.writer(), "hello");
-    try writeVarBytes(fbs.writer(), "");
-    try writeVarBytes(fbs.writer(), "world!");
+    try writeVarBytes(&fbs, "hello");
+    try writeVarBytes(&fbs, "");
+    try writeVarBytes(&fbs, "world!");
     const written = fbs.seek;
 
     var rb = io.fixedBufferStream(@as([]const u8, buf[0..written]));
@@ -346,11 +346,11 @@ test "tuple round-trip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
     const parts = [_][]const u8{ "moq", "demo", "camera" };
-    try writeTuple(fbs.writer(), &parts);
+    try writeTuple(&fbs, &parts);
     const written = fbs.seek;
 
     var rb = io.fixedBufferStream(@as([]const u8, buf[0..written]));
-    const count = try readVarInt(rb.reader());
+    const count = try readVarInt(&rb);
     try testing.expectEqual(@as(u64, 3), count);
     const p0 = try readVarBytesZc(&rb);
     const p1 = try readVarBytesZc(&rb);
@@ -368,7 +368,7 @@ test "kv list round-trip with delta encoding" {
         .{ .key = 3, .value = .{ .bytes = "path" } },
         .{ .key = 7, .value = .{ .bytes = "impl-x" } },
     };
-    try encodeKvList(fbs.writer(), &entries);
+    try encodeKvList(&fbs, &entries);
     const written = fbs.seek;
 
     // First delta must be 2, then 1, then 4 — verify on the wire.
@@ -393,5 +393,5 @@ test "kv encoder rejects descending keys" {
         .{ .key = 4, .value = .{ .varint = 1 } },
         .{ .key = 3, .value = .{ .bytes = "x" } },
     };
-    try testing.expectError(Error.KeyOrderViolation, encodeKvList(fbs.writer(), &entries));
+    try testing.expectError(Error.KeyOrderViolation, encodeKvList(&fbs, &entries));
 }

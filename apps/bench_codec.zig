@@ -61,7 +61,7 @@ pub fn main(_: std.process.Init.Minimal) !void {
         while (i < ITER) : (i += 1) {
             escape([N]u8, &scratch);
             var fbs = io_compat.fixedBufferStream(@as([]const u8, &scratch));
-            const r = fbs.reader();
+            const r = &fbs;
             acc +%= packet.readVarInt(r) catch 0;
             escapeVal(acc);
         }
@@ -83,7 +83,7 @@ pub fn main(_: std.process.Init.Minimal) !void {
         while (i < ITER) : (i += 1) {
             escape([8]u8, &buf);
             var fbs = io_compat.fixedBufferStream(&buf);
-            packet.writeVarInt(fbs.writer(), tc.value +% @as(u64, i & 0xff)) catch {};
+            packet.writeVarInt(&fbs, tc.value +% @as(u64, i & 0xff)) catch {};
             escape([8]u8, &buf);
         }
         const elapsed = now() - start;
@@ -94,11 +94,11 @@ pub fn main(_: std.process.Init.Minimal) !void {
     var stream_frame_buf: [64]u8 = undefined;
     const stream_len = blk: {
         var fbs = io_compat.fixedBufferStream(&stream_frame_buf);
-        try packet.writeVarInt(fbs.writer(), 0x0f); // STREAM OFF+LEN+FIN
-        try packet.writeVarInt(fbs.writer(), 4);
-        try packet.writeVarInt(fbs.writer(), 100);
-        try packet.writeVarInt(fbs.writer(), 16);
-        try fbs.writer().writeAll(&[_]u8{0} ** 16);
+        try packet.writeVarInt(&fbs, 0x0f); // STREAM OFF+LEN+FIN
+        try packet.writeVarInt(&fbs, 4);
+        try packet.writeVarInt(&fbs, 100);
+        try packet.writeVarInt(&fbs, 16);
+        try fbs.writeAll(&[_]u8{0} ** 16);
         break :blk fbs.seek;
     };
     {
@@ -119,11 +119,11 @@ pub fn main(_: std.process.Init.Minimal) !void {
     var ack_frame_buf: [16]u8 = undefined;
     const ack_len = blk: {
         var fbs = io_compat.fixedBufferStream(&ack_frame_buf);
-        try packet.writeVarInt(fbs.writer(), 2);
-        try packet.writeVarInt(fbs.writer(), 100);
-        try packet.writeVarInt(fbs.writer(), 10);
-        try packet.writeVarInt(fbs.writer(), 0);
-        try packet.writeVarInt(fbs.writer(), 5);
+        try packet.writeVarInt(&fbs, 2);
+        try packet.writeVarInt(&fbs, 100);
+        try packet.writeVarInt(&fbs, 10);
+        try packet.writeVarInt(&fbs, 0);
+        try packet.writeVarInt(&fbs, 5);
         break :blk fbs.seek;
     };
     {
@@ -156,7 +156,7 @@ pub fn main(_: std.process.Init.Minimal) !void {
         while (i < ITER) : (i += 1) {
             escape([128]u8, &serialize_buf);
             var fbs = io_compat.fixedBufferStream(&serialize_buf);
-            try stream_frame.write(fbs.writer());
+            try stream_frame.write(&fbs);
             escape([128]u8, &serialize_buf);
         }
         const elapsed = now() - start;
@@ -167,9 +167,9 @@ pub fn main(_: std.process.Init.Minimal) !void {
     var h3_buf: [64]u8 = undefined;
     const h3_len = blk: {
         var fbs = io_compat.fixedBufferStream(&h3_buf);
-        try packet.writeVarInt(fbs.writer(), 0); // DATA
-        try packet.writeVarInt(fbs.writer(), 16);
-        try fbs.writer().writeAll(&[_]u8{0} ** 16);
+        try packet.writeVarInt(&fbs, 0); // DATA
+        try packet.writeVarInt(&fbs, 16);
+        try fbs.writeAll(&[_]u8{0} ** 16);
         break :blk fbs.seek;
     };
     {
@@ -197,7 +197,7 @@ pub fn main(_: std.process.Init.Minimal) !void {
         while (i < ITER) : (i += 1) {
             escape([64]u8, &out);
             var fbs = io_compat.fixedBufferStream(&out);
-            try h3_frame.write(h3_data, fbs.writer());
+            try h3_frame.write(h3_data, &fbs);
             escape([64]u8, &out);
         }
         const elapsed = now() - start;

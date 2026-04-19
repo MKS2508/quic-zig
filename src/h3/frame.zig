@@ -61,8 +61,16 @@ pub const SettingsId = enum(u64) {
     enable_connect_protocol = 0x08,
     h3_datagram = 0x33,
     enable_webtransport = 0x2b603742, // draft-06 and earlier
-    wt_enabled = 0x2c7cf000, // SETTINGS_WT_ENABLED (current draft)
-    webtransport_max_sessions = 0xc671706a,
+    wt_enabled = 0x2c7cf000, // SETTINGS_WT_ENABLED (intermediate draft)
+    webtransport_max_sessions = 0xc671706a, // pre-draft-13
+    // draft-ietf-webtrans-http3-13 §9.2.
+    // Safari 26.4+ implements this draft; WT_MAX_SESSIONS moved to the value
+    // below and the new per-session stream/data credits must be advertised or
+    // the peer refuses to open WT streams / fully establish the session.
+    wt_max_sessions_v13 = 0x14e9cd29,
+    wt_initial_max_data = 0x2b61,
+    wt_initial_max_streams_uni = 0x2b64,
+    wt_initial_max_streams_bidi = 0x2b65,
 
     pub fn fromInt(v: u64) ?SettingsId {
         return switch (v) {
@@ -74,6 +82,10 @@ pub const SettingsId = enum(u64) {
             0x2b603742 => .enable_webtransport,
             0x2c7cf000 => .wt_enabled,
             0xc671706a => .webtransport_max_sessions,
+            0x14e9cd29 => .wt_max_sessions_v13,
+            0x2b61 => .wt_initial_max_data,
+            0x2b64 => .wt_initial_max_streams_uni,
+            0x2b65 => .wt_initial_max_streams_bidi,
             else => null,
         };
     }
@@ -88,6 +100,13 @@ pub const Settings = struct {
     h3_datagram: bool = false,
     enable_webtransport: bool = false,
     webtransport_max_sessions: ?u64 = null,
+    // draft-ietf-webtrans-http3-13 §9.2. Null = not advertised (spec default = 0).
+    // On serialization, `webtransport_max_sessions` is emitted under BOTH the
+    // pre-draft-13 ID and the draft-13 ID (wt_max_sessions_v13) — Safari 26.4
+    // only reads the new one, Chrome reads the old.
+    wt_initial_max_data: ?u64 = null,
+    wt_initial_max_streams_bidi: ?u64 = null,
+    wt_initial_max_streams_uni: ?u64 = null,
 };
 
 /// PRIORITY_UPDATE payload (RFC 9218).
@@ -141,7 +160,7 @@ pub fn parse(data: []const u8) !struct { frame: H3Frame, consumed: usize } {
     if (data.len == 0) return error.BufferTooShort;
 
     var fbs = io.fixedBufferStream(data);
-    const reader = fbs.reader();
+    const reader = &fbs;
 
     // Type (varint)
     const frame_type_raw = packet.readVarInt(reader) catch return error.BufferTooShort;
@@ -178,7 +197,7 @@ pub fn parse(data: []const u8) !struct { frame: H3Frame, consumed: usize } {
         .settings => blk: {
             var settings = Settings{};
             var sfbs = io.fixedBufferStream(payload);
-            const sreader = sfbs.reader();
+            const sreader = &sfbs;
 
             while (sfbs.seek < payload.len) {
                 const id_raw = packet.readVarInt(sreader) catch break;
@@ -197,7 +216,16 @@ pub fn parse(data: []const u8) !struct { frame: H3Frame, consumed: usize } {
                         .enable_connect_protocol => settings.enable_connect_protocol = (value != 0),
                         .h3_datagram => settings.h3_datagram = (value != 0),
                         .enable_webtransport, .wt_enabled => settings.enable_webtransport = (value != 0),
-                        .webtransport_max_sessions => settings.webtransport_max_sessions = value,
+                        .webtransport_max_sessions, .wt_max_sessions_v13 => {
+                            settings.webtransport_max_sessions = value;
+                            // Draft-13 §9.2: max_sessions > 0 IS the enablement signal
+                            // (SETTINGS_WT_ENABLED was removed). Mirror to the legacy
+                            // flag so existing call sites work regardless of draft.
+                            if (value > 0) settings.enable_webtransport = true;
+                        },
+                        .wt_initial_max_data => settings.wt_initial_max_data = value,
+                        .wt_initial_max_streams_bidi => settings.wt_initial_max_streams_bidi = value,
+                        .wt_initial_max_streams_uni => settings.wt_initial_max_streams_uni = value,
                     }
                 }
                 // Unknown settings are ignored (RFC 9114 Section 7.2.4.1)
@@ -206,7 +234,7 @@ pub fn parse(data: []const u8) !struct { frame: H3Frame, consumed: usize } {
         },
         .goaway => blk: {
             var gfbs = io.fixedBufferStream(payload);
-            const greader = gfbs.reader();
+            const greader = &gfbs;
             const id = packet.readVarInt(greader) catch return error.MalformedGoaway;
             break :blk .{ .goaway = id };
         },
@@ -218,20 +246,20 @@ pub fn parse(data: []const u8) !struct { frame: H3Frame, consumed: usize } {
                 break :blk .{ .cancel_push = 0 };
             }
             var cfbs = io.fixedBufferStream(payload);
-            const creader = cfbs.reader();
+            const creader = &cfbs;
             const id = packet.readVarInt(creader) catch return error.MalformedFrame;
             break :blk .{ .cancel_push = id };
         },
         .max_push_id => blk: {
             var mfbs = io.fixedBufferStream(payload);
-            const mreader = mfbs.reader();
+            const mreader = &mfbs;
             const id = packet.readVarInt(mreader) catch return error.MalformedFrame;
             break :blk .{ .max_push_id = id };
         },
         .push_promise => .{ .push_promise = {} },
         .priority_update => blk: {
             var pfbs = io.fixedBufferStream(payload);
-            const preader = pfbs.reader();
+            const preader = &pfbs;
             const prioritized_id = packet.readVarInt(preader) catch return error.MalformedFrame;
             const fv_start = pfbs.seek;
             break :blk .{ .priority_update = .{
@@ -275,7 +303,7 @@ pub fn write(frame: H3Frame, writer: anytype) !void {
             // Serialize settings to a temp buffer to get length
             var buf: [128]u8 = undefined;
             var sfbs = io.fixedBufferStream(&buf);
-            const sw = sfbs.writer();
+            const sw = &sfbs;
 
             // Always write qpack settings (even if 0, to be explicit)
             try packet.writeVarInt(sw, @intFromEnum(SettingsId.qpack_max_table_capacity));
@@ -300,20 +328,31 @@ pub fn write(frame: H3Frame, writer: anytype) !void {
             }
 
             if (s.enable_webtransport) {
-                // Send both old (draft-06) and new (current draft) setting IDs
-                // for compatibility with all WebTransport implementations
                 try packet.writeVarInt(sw, @intFromEnum(SettingsId.enable_webtransport));
                 try packet.writeVarInt(sw, 1);
                 try packet.writeVarInt(sw, @intFromEnum(SettingsId.wt_enabled));
                 try packet.writeVarInt(sw, 1);
             }
-
             if (s.webtransport_max_sessions) |max_sessions| {
                 try packet.writeVarInt(sw, @intFromEnum(SettingsId.webtransport_max_sessions));
                 try packet.writeVarInt(sw, max_sessions);
             }
+            // draft-15 §9.2 per-session WT credits. Default 0 = peer refuses to
+            // open WT streams / send bytes. Required for Safari 26.4 bidi.
+            if (s.wt_initial_max_data) |n| {
+                try packet.writeVarInt(sw, @intFromEnum(SettingsId.wt_initial_max_data));
+                try packet.writeVarInt(sw, n);
+            }
+            if (s.wt_initial_max_streams_bidi) |n| {
+                try packet.writeVarInt(sw, @intFromEnum(SettingsId.wt_initial_max_streams_bidi));
+                try packet.writeVarInt(sw, n);
+            }
+            if (s.wt_initial_max_streams_uni) |n| {
+                try packet.writeVarInt(sw, @intFromEnum(SettingsId.wt_initial_max_streams_uni));
+                try packet.writeVarInt(sw, n);
+            }
 
-            const settings_payload = sfbs.getWritten();
+            const settings_payload = sfbs.buffered();
             try packet.writeVarInt(writer, 0x04);
             try packet.writeVarInt(writer, settings_payload.len);
             try writer.writeAll(settings_payload);
@@ -322,7 +361,7 @@ pub fn write(frame: H3Frame, writer: anytype) !void {
             // Serialize id to get its varint length
             var buf: [8]u8 = undefined;
             var gfbs = io.fixedBufferStream(&buf);
-            try packet.writeVarInt(gfbs.writer(), id);
+            try packet.writeVarInt(&gfbs, id);
             const payload_len = gfbs.seek;
 
             try packet.writeVarInt(writer, 0x07);
@@ -332,7 +371,7 @@ pub fn write(frame: H3Frame, writer: anytype) !void {
         .cancel_push => |id| {
             var buf: [8]u8 = undefined;
             var cfbs = io.fixedBufferStream(&buf);
-            try packet.writeVarInt(cfbs.writer(), id);
+            try packet.writeVarInt(&cfbs, id);
             const payload_len = cfbs.seek;
 
             try packet.writeVarInt(writer, 0x03);
@@ -342,7 +381,7 @@ pub fn write(frame: H3Frame, writer: anytype) !void {
         .max_push_id => |id| {
             var buf: [8]u8 = undefined;
             var mfbs = io.fixedBufferStream(&buf);
-            try packet.writeVarInt(mfbs.writer(), id);
+            try packet.writeVarInt(&mfbs, id);
             const payload_len = mfbs.seek;
 
             try packet.writeVarInt(writer, 0x0d);
@@ -354,7 +393,7 @@ pub fn write(frame: H3Frame, writer: anytype) !void {
             // Compute payload length: varint(stream_id) + field_value bytes
             var id_buf: [8]u8 = undefined;
             var id_fbs = io.fixedBufferStream(&id_buf);
-            try packet.writeVarInt(id_fbs.writer(), pu.stream_id);
+            try packet.writeVarInt(&id_fbs, pu.stream_id);
             const payload_len = id_fbs.seek + pu.field_value.len;
 
             try packet.writeVarInt(writer, 0xF0700);
@@ -417,9 +456,9 @@ test "H3Frame: write and parse DATA" {
     var fbs = io.fixedBufferStream(&buf);
 
     const payload = "hello world";
-    try write(.{ .data = payload }, fbs.writer());
+    try write(.{ .data = payload }, &fbs);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(H3FrameType.data, std.meta.activeTag(result.frame));
@@ -432,9 +471,9 @@ test "H3Frame: write and parse HEADERS" {
     var fbs = io.fixedBufferStream(&buf);
 
     const headers_data = &[_]u8{ 0x00, 0x00, 0xc0 | 17 }; // prefix + indexed :method GET
-    try write(.{ .headers = headers_data }, fbs.writer());
+    try write(.{ .headers = headers_data }, &fbs);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(H3FrameType.headers, std.meta.activeTag(result.frame));
@@ -450,9 +489,9 @@ test "H3Frame: write and parse SETTINGS" {
         .qpack_blocked_streams = 0,
         .max_field_section_size = 4096,
     };
-    try write(.{ .settings = settings }, fbs.writer());
+    try write(.{ .settings = settings }, &fbs);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(H3FrameType.settings, std.meta.activeTag(result.frame));
@@ -465,9 +504,9 @@ test "H3Frame: write and parse GOAWAY" {
     var buf: [256]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
 
-    try write(.{ .goaway = 42 }, fbs.writer());
+    try write(.{ .goaway = 42 }, &fbs);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(H3FrameType.goaway, std.meta.activeTag(result.frame));
@@ -478,10 +517,10 @@ test "H3Frame: reject reserved HTTP/2 frame types" {
     // Frame type 0x02 (PRIORITY in HTTP/2) is reserved
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try packet.writeVarInt(fbs.writer(), 0x02); // type
-    try packet.writeVarInt(fbs.writer(), 0); // length
+    try packet.writeVarInt(&fbs, 0x02); // type
+    try packet.writeVarInt(&fbs, 0); // length
 
-    const result = parse(fbs.getWritten());
+    const result = parse(fbs.buffered());
     try testing.expectError(error.H3FrameUnexpected, result);
 }
 
@@ -494,20 +533,20 @@ test "H3Frame: partial frame" {
     // DATA frame type + length=100, but only 5 bytes of payload
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try packet.writeVarInt(fbs.writer(), 0x00); // DATA
-    try packet.writeVarInt(fbs.writer(), 100); // length = 100
+    try packet.writeVarInt(&fbs, 0x00); // DATA
+    try packet.writeVarInt(&fbs, 100); // length = 100
 
-    const result = parse(fbs.getWritten());
+    const result = parse(fbs.buffered());
     try testing.expectError(error.BufferTooShort, result);
 }
 
 test "H3Frame: empty SETTINGS" {
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try packet.writeVarInt(fbs.writer(), 0x04); // SETTINGS
-    try packet.writeVarInt(fbs.writer(), 0); // length = 0
+    try packet.writeVarInt(&fbs, 0x04); // SETTINGS
+    try packet.writeVarInt(&fbs, 0); // length = 0
 
-    const result = try parse(fbs.getWritten());
+    const result = try parse(fbs.buffered());
     try testing.expectEqual(H3FrameType.settings, std.meta.activeTag(result.frame));
     try testing.expectEqual(@as(u64, 0), result.frame.settings.qpack_max_table_capacity);
     try testing.expect(result.frame.settings.max_field_section_size == null);
@@ -525,9 +564,9 @@ test "H3Frame: write and parse SETTINGS with WebTransport fields" {
         .enable_webtransport = true,
         .webtransport_max_sessions = 1,
     };
-    try write(.{ .settings = settings }, fbs.writer());
+    try write(.{ .settings = settings }, &fbs);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(H3FrameType.settings, std.meta.activeTag(result.frame));
@@ -544,9 +583,9 @@ test "H3Frame: write and parse PRIORITY_UPDATE" {
     try write(.{ .priority_update = .{
         .stream_id = 4,
         .field_value = "u=1, i",
-    } }, fbs.writer());
+    } }, &fbs);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(H3FrameType.priority_update, std.meta.activeTag(result.frame));
@@ -562,9 +601,9 @@ test "H3Frame: write and parse PRIORITY_UPDATE empty field value" {
     try write(.{ .priority_update = .{
         .stream_id = 0,
         .field_value = "",
-    } }, fbs.writer());
+    } }, &fbs);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(H3FrameType.priority_update, std.meta.activeTag(result.frame));
@@ -579,9 +618,9 @@ test "H3Frame: write and parse CLOSE_WEBTRANSPORT_SESSION" {
     try write(.{ .close_webtransport_session = .{
         .error_code = 42,
         .reason = "goodbye",
-    } }, fbs.writer());
+    } }, &fbs);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(H3FrameType.close_webtransport_session, std.meta.activeTag(result.frame));
@@ -597,9 +636,9 @@ test "H3Frame: write and parse CLOSE_WEBTRANSPORT_SESSION no reason" {
     try write(.{ .close_webtransport_session = .{
         .error_code = 0,
         .reason = "",
-    } }, fbs.writer());
+    } }, &fbs);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(H3FrameType.close_webtransport_session, std.meta.activeTag(result.frame));
@@ -610,10 +649,10 @@ test "H3Frame: write and parse CLOSE_WEBTRANSPORT_SESSION no reason" {
 test "UniStreamType: write and read" {
     var buf: [8]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try writeUniStreamType(fbs.writer(), .control);
+    try writeUniStreamType(&fbs, .control);
 
-    var rfbs = io.fixedBufferStream(fbs.getWritten());
-    const st = try readUniStreamType(rfbs.reader());
+    var rfbs = io.fixedBufferStream(fbs.buffered());
+    const st = try readUniStreamType(&rfbs);
     try testing.expectEqual(UniStreamType.control, st);
 }
 
@@ -625,9 +664,9 @@ test "H3Frame: all reserved HTTP/2 frame types rejected" {
     for (reserved) |t| {
         var buf: [4]u8 = undefined;
         var fbs = io.fixedBufferStream(&buf);
-        try packet.writeVarInt(fbs.writer(), t);
-        try packet.writeVarInt(fbs.writer(), 0);
-        try testing.expectError(error.H3FrameUnexpected, parse(fbs.getWritten()));
+        try packet.writeVarInt(&fbs, t);
+        try packet.writeVarInt(&fbs, 0);
+        try testing.expectError(error.H3FrameUnexpected, parse(fbs.buffered()));
     }
 }
 
@@ -637,11 +676,11 @@ test "H3Frame: all reserved HTTP/2 SETTINGS ids rejected" {
     for (reserved_ids) |id| {
         var buf: [8]u8 = undefined;
         var fbs = io.fixedBufferStream(&buf);
-        try packet.writeVarInt(fbs.writer(), 0x04); // SETTINGS
-        try packet.writeVarInt(fbs.writer(), 2); // length = 2 bytes (id + value)
-        try packet.writeVarInt(fbs.writer(), id);
-        try packet.writeVarInt(fbs.writer(), 0);
-        try testing.expectError(error.H3SettingsError, parse(fbs.getWritten()));
+        try packet.writeVarInt(&fbs, 0x04); // SETTINGS
+        try packet.writeVarInt(&fbs, 2); // length = 2 bytes (id + value)
+        try packet.writeVarInt(&fbs, id);
+        try packet.writeVarInt(&fbs, 0);
+        try testing.expectError(error.H3SettingsError, parse(fbs.buffered()));
     }
 }
 
@@ -667,21 +706,21 @@ test "H3Frame: CLOSE_WEBTRANSPORT_SESSION with <4 byte payload rejected" {
     // type = 0x2843 (2-byte varint), length = 3, payload = 3 bytes
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try packet.writeVarInt(fbs.writer(), 0x2843);
-    try packet.writeVarInt(fbs.writer(), 3);
-    try fbs.writer().writeAll(&[_]u8{ 0xaa, 0xbb, 0xcc });
-    try testing.expectError(error.MalformedFrame, parse(fbs.getWritten()));
+    try packet.writeVarInt(&fbs, 0x2843);
+    try packet.writeVarInt(&fbs, 3);
+    try fbs.writeAll(&[_]u8{ 0xaa, 0xbb, 0xcc });
+    try testing.expectError(error.MalformedFrame, parse(fbs.buffered()));
 }
 
 // CLOSE_WEBTRANSPORT_SESSION with exactly 4 bytes (error code, no reason).
 test "H3Frame: CLOSE_WEBTRANSPORT_SESSION no reason accepted" {
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try packet.writeVarInt(fbs.writer(), 0x2843);
-    try packet.writeVarInt(fbs.writer(), 4);
-    try fbs.writer().writeInt(u32, 0xdeadbeef, .big);
+    try packet.writeVarInt(&fbs, 0x2843);
+    try packet.writeVarInt(&fbs, 4);
+    try fbs.writeInt(u32, 0xdeadbeef, .big);
 
-    const result = try parse(fbs.getWritten());
+    const result = try parse(fbs.buffered());
     try testing.expectEqual(H3FrameType.close_webtransport_session, std.meta.activeTag(result.frame));
     try testing.expectEqual(@as(u32, 0xdeadbeef), result.frame.close_webtransport_session.error_code);
     try testing.expectEqualStrings("", result.frame.close_webtransport_session.reason);
@@ -693,10 +732,10 @@ test "H3Frame: PRIORITY_UPDATE with truncated stream_id rejected" {
     // 0xc0 begins an 8-byte varint but only 1 payload byte is present.
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try packet.writeVarInt(fbs.writer(), 0xF0700);
-    try packet.writeVarInt(fbs.writer(), 1);
-    try fbs.writer().writeByte(0xc0);
-    try testing.expectError(error.MalformedFrame, parse(fbs.getWritten()));
+    try packet.writeVarInt(&fbs, 0xF0700);
+    try packet.writeVarInt(&fbs, 1);
+    try fbs.writeByte(0xc0);
+    try testing.expectError(error.MalformedFrame, parse(fbs.buffered()));
 }
 
 // Length field that claims more bytes than available.
@@ -704,9 +743,9 @@ test "H3Frame: length exceeding available bytes rejected" {
     // DATA type + length = 2^62-1 (max varint). Buffer is tiny.
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try packet.writeVarInt(fbs.writer(), 0x00);
-    try packet.writeVarInt(fbs.writer(), 0x3fffffffffffffff); // 8-byte max varint
-    try testing.expectError(error.BufferTooShort, parse(fbs.getWritten()));
+    try packet.writeVarInt(&fbs, 0x00);
+    try packet.writeVarInt(&fbs, 0x3fffffffffffffff); // 8-byte max varint
+    try testing.expectError(error.BufferTooShort, parse(fbs.buffered()));
 }
 
 // Multiple GREASE frames before SETTINGS must all be skipped consistently.
@@ -714,15 +753,15 @@ test "H3Frame: multiple sequential GREASE frames all skip" {
     var buf: [32]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
     // Three grease frames with varying types and payloads:
-    try packet.writeVarInt(fbs.writer(), 0x1f + 0x21); // 0x40
-    try packet.writeVarInt(fbs.writer(), 0);
-    try packet.writeVarInt(fbs.writer(), 0x1f * 2 + 0x21); // 0x5f
-    try packet.writeVarInt(fbs.writer(), 1);
-    try fbs.writer().writeByte(0xaa);
-    try packet.writeVarInt(fbs.writer(), 0x1f * 3 + 0x21); // 0x7e
-    try packet.writeVarInt(fbs.writer(), 0);
+    try packet.writeVarInt(&fbs, 0x1f + 0x21); // 0x40
+    try packet.writeVarInt(&fbs, 0);
+    try packet.writeVarInt(&fbs, 0x1f * 2 + 0x21); // 0x5f
+    try packet.writeVarInt(&fbs, 1);
+    try fbs.writeByte(0xaa);
+    try packet.writeVarInt(&fbs, 0x1f * 3 + 0x21); // 0x7e
+    try packet.writeVarInt(&fbs, 0);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     var offset: usize = 0;
     var count: usize = 0;
     while (offset < written.len) {

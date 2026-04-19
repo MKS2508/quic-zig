@@ -308,7 +308,7 @@ pub const ConnectionManager = struct {
             if (header.version != 0 and !protocol.isSupportedVersion(header.version)) {
                 var vn_fbs = io.fixedBufferStream(out_buf);
                 packet.negotiateVersion(header, &vn_fbs) catch return .{ .dropped = {} };
-                return .{ .send_response = vn_fbs.getWritten() };
+                return .{ .send_response = vn_fbs.buffered() };
             }
 
             // Route to existing connection by DCID
@@ -349,7 +349,7 @@ pub const ConnectionManager = struct {
                         var retry_fbs = io.fixedBufferStream(out_buf);
                         packet.retry(header, &retry_scid, token_buf[0..token_len], &retry_fbs) catch
                             return .{ .dropped = {} };
-                        return .{ .send_response = retry_fbs.getWritten() };
+                        return .{ .send_response = retry_fbs.buffered() };
                     }
 
                     // Has token: validate as Retry token

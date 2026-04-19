@@ -232,7 +232,7 @@ const RelayHandler = struct {
 
         var buf: [256]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
-        moq_msg.writeSetup(fbs.writer(), .{ .implementation = "quic-zig/moq-wt-relay" }) catch return;
+        moq_msg.writeSetup(&fbs, .{ .implementation = "quic-zig/moq-wt-relay" }) catch return;
         session.sendStreamData(ctrl, buf[0..fbs.seek]) catch return;
         self.clients[ci].setup_sent = true;
         std.debug.print("[relay] client {d} connected (WT session {d})\n", .{ ci, session_id });
@@ -281,7 +281,7 @@ const RelayHandler = struct {
         // bytes in 0x10..0x3D. If the first byte has the 0x80 bit set and is
         // one of the SETUP pattern bytes, treat as control. Otherwise data.
         var peek = io_compat.fixedBufferStream(@as([]const u8, buf.slice()));
-        const first_varint = moq_wire.readVarInt(peek.reader()) catch {
+        const first_varint = moq_wire.readVarInt(&peek) catch {
             self.clients[ci].setRole(stream_id, .data);
             self.tryForwardData(ci, stream_id, fin);
             return;
@@ -351,7 +351,7 @@ const RelayHandler = struct {
 
             var buf: [256]u8 = undefined;
             var fbs = io_compat.fixedBufferStream(&buf);
-            moq_msg.writeSubscribeOk(fbs.writer(), .{ .track_alias = alias }) catch return;
+            moq_msg.writeSubscribeOk(&fbs, .{ .track_alias = alias }) catch return;
             session.sendStreamData(stream_id, buf[0..fbs.seek]) catch return;
             std.debug.print("[relay] SUBSCRIBE_OK → client {d} alias={d} (track {d}, {d} subs, pub={?d})\n", .{
                 ci, alias, ti, t.sub_count, t.publisher_idx,
@@ -380,7 +380,7 @@ const RelayHandler = struct {
 
             var hdr_buf: [128]u8 = undefined;
             var hdr_fbs = io_compat.fixedBufferStream(&hdr_buf);
-            moq_obj.writeSubgroupHeader(hdr_fbs.writer(), .{
+            moq_obj.writeSubgroupHeader(&hdr_fbs, .{
                 .track_alias = sub_alias,
                 .group = cg.group_id,
                 .subgroup = cg.subgroup_id,
@@ -421,7 +421,7 @@ const RelayHandler = struct {
 
         var buf: [256]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
-        moq_msg.writePublishOk(fbs.writer(), .{}) catch return;
+        moq_msg.writePublishOk(&fbs, .{}) catch return;
         session.sendStreamData(stream_id, buf[0..fbs.seek]) catch return;
         std.debug.print("[relay] PUBLISH_OK → client {d} (track {d}, {d} subs)\n", .{ ci, ti, t.sub_count });
     }
@@ -474,7 +474,7 @@ const RelayHandler = struct {
 
                 var hdr_buf: [128]u8 = undefined;
                 var hdr_fbs = io_compat.fixedBufferStream(&hdr_buf);
-                moq_obj.writeSubgroupHeader(hdr_fbs.writer(), .{
+                moq_obj.writeSubgroupHeader(&hdr_fbs, .{
                     .track_alias = t.sub_alias[si],
                     .group = h.group,
                     .subgroup = h.subgroup,

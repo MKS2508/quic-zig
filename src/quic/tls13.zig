@@ -717,7 +717,7 @@ pub const Tls13Handshake = struct {
 
         // Pre-encode transport params to avoid dangling slices after struct move
         var tp_fbs = io.fixedBufferStream(&self.tp_encoded);
-        local_tp.encode(tp_fbs.writer()) catch {};
+        local_tp.encode(&tp_fbs) catch {};
         self.tp_encoded_len = tp_fbs.seek;
 
         // Generate X25519 key pair
@@ -770,7 +770,7 @@ pub const Tls13Handshake = struct {
 
         // Pre-encode transport params to avoid dangling slices after struct move
         var tp_fbs = io.fixedBufferStream(&self.tp_encoded);
-        local_tp.encode(tp_fbs.writer()) catch {};
+        local_tp.encode(&tp_fbs) catch {};
         self.tp_encoded_len = tp_fbs.seek;
 
         // Generate X25519 key pair
@@ -1462,7 +1462,7 @@ pub const Tls13Handshake = struct {
                     self.local_transport_params.version_info_chosen = protocol.QUIC_V2;
                     // Re-encode transport params so EncryptedExtensions carries the updated chosen_version
                     var tp_fbs = io.fixedBufferStream(&self.tp_encoded);
-                    self.local_transport_params.encode(tp_fbs.writer()) catch {};
+                    self.local_transport_params.encode(&tp_fbs) catch {};
                     self.tp_encoded_len = tp_fbs.seek;
                 }
             }
@@ -2755,8 +2755,8 @@ test "buildClientHello: produces valid message" {
     // Pre-encode transport params
     var tp_enc_buf: [256]u8 = undefined;
     var tp_fbs = io.fixedBufferStream(&tp_enc_buf);
-    try tp.encode(tp_fbs.writer());
-    const tp_encoded = tp_fbs.getWritten();
+    try tp.encode(&tp_fbs);
+    const tp_encoded = tp_fbs.buffered();
 
     var ks = KeySchedule.init();
     var buf: [4096]u8 = undefined;

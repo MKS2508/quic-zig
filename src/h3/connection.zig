@@ -174,28 +174,28 @@ pub const H3Connection = struct {
         // Write stream type
         var type_buf: [8]u8 = undefined;
         var type_fbs = io.fixedBufferStream(&type_buf);
-        try h3_frame.writeUniStreamType(type_fbs.writer(), .control);
-        try ctrl.writeData(type_fbs.getWritten());
+        try h3_frame.writeUniStreamType(&type_fbs, .control);
+        try ctrl.writeData(type_fbs.buffered());
 
         // Send SETTINGS frame on control stream
         var settings_buf: [128]u8 = undefined;
         var settings_fbs = io.fixedBufferStream(&settings_buf);
-        try h3_frame.write(.{ .settings = self.local_settings }, settings_fbs.writer());
-        try ctrl.writeData(settings_fbs.getWritten());
+        try h3_frame.write(.{ .settings = self.local_settings }, &settings_fbs);
+        try ctrl.writeData(settings_fbs.buffered());
 
         // Open QPACK encoder stream (type 0x02) — empty for static-only
         const enc = try self.quic_conn.openUniStream();
         self.local_qpack_enc_stream = enc;
         type_fbs = io.fixedBufferStream(&type_buf);
-        try h3_frame.writeUniStreamType(type_fbs.writer(), .qpack_encoder);
-        try enc.writeData(type_fbs.getWritten());
+        try h3_frame.writeUniStreamType(&type_fbs, .qpack_encoder);
+        try enc.writeData(type_fbs.buffered());
 
         // Open QPACK decoder stream (type 0x03) — empty for static-only
         const dec = try self.quic_conn.openUniStream();
         self.local_qpack_dec_stream = dec;
         type_fbs = io.fixedBufferStream(&type_buf);
-        try h3_frame.writeUniStreamType(type_fbs.writer(), .qpack_decoder);
-        try dec.writeData(type_fbs.getWritten());
+        try h3_frame.writeUniStreamType(&type_fbs, .qpack_decoder);
+        try dec.writeData(type_fbs.buffered());
 
         self.initialized = true;
     }
@@ -218,8 +218,8 @@ pub const H3Connection = struct {
 
         var frame_buf: [4096 + 16]u8 = undefined;
         var fbs = io.fixedBufferStream(&frame_buf);
-        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer());
-        try stream.send.writeData(fbs.getWritten());
+        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs);
+        try stream.send.writeData(fbs.buffered());
 
         // Send encoder instructions on QPACK encoder stream
         try self.flushEncoderInstructions();
@@ -229,10 +229,10 @@ pub const H3Connection = struct {
         if (body) |b| {
             var hdr_buf: [16]u8 = undefined;
             var hdr_fbs = io.fixedBufferStream(&hdr_buf);
-            const hdr_writer = hdr_fbs.writer();
+            const hdr_writer = &hdr_fbs;
             packet.writeVarInt(hdr_writer, 0x00) catch unreachable; // DATA frame type
             packet.writeVarInt(hdr_writer, b.len) catch unreachable;
-            try stream.send.writeData(hdr_fbs.getWritten());
+            try stream.send.writeData(hdr_fbs.buffered());
             try stream.send.writeData(b);
         }
 
@@ -266,8 +266,8 @@ pub const H3Connection = struct {
 
         var frame_buf: [4096 + 16]u8 = undefined;
         var fbs = io.fixedBufferStream(&frame_buf);
-        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer());
-        try stream.send.writeData(fbs.getWritten());
+        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs);
+        try stream.send.writeData(fbs.buffered());
 
         try self.flushEncoderInstructions();
 
@@ -301,8 +301,8 @@ pub const H3Connection = struct {
 
         var frame_buf: [4096 + 16]u8 = undefined;
         var fbs = io.fixedBufferStream(&frame_buf);
-        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer());
-        try stream.send.writeData(fbs.getWritten());
+        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs);
+        try stream.send.writeData(fbs.buffered());
 
         try self.flushEncoderInstructions();
         return stream_id;
@@ -322,8 +322,8 @@ pub const H3Connection = struct {
 
         var frame_buf: [4096 + 16]u8 = undefined;
         var fbs = io.fixedBufferStream(&frame_buf);
-        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer());
-        try stream.send.writeData(fbs.getWritten());
+        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs);
+        try stream.send.writeData(fbs.buffered());
 
         try self.flushEncoderInstructions();
 
@@ -347,8 +347,8 @@ pub const H3Connection = struct {
 
         var frame_buf: [4096 + 16]u8 = undefined;
         var fbs = io.fixedBufferStream(&frame_buf);
-        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer());
-        try stream.send.writeData(fbs.getWritten());
+        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs);
+        try stream.send.writeData(fbs.buffered());
 
         try self.flushEncoderInstructions();
 
@@ -370,8 +370,8 @@ pub const H3Connection = struct {
 
         var frame_buf: [4096 + 16]u8 = undefined;
         var fbs = io.fixedBufferStream(&frame_buf);
-        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer());
-        try stream.send.writeData(fbs.getWritten());
+        try h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs);
+        try stream.send.writeData(fbs.buffered());
 
         // Send encoder instructions on QPACK encoder stream
         try self.flushEncoderInstructions();
@@ -381,10 +381,10 @@ pub const H3Connection = struct {
         if (body) |b| {
             var hdr_buf: [16]u8 = undefined;
             var hdr_fbs = io.fixedBufferStream(&hdr_buf);
-            const hdr_writer = hdr_fbs.writer();
+            const hdr_writer = &hdr_fbs;
             packet.writeVarInt(hdr_writer, 0x00) catch unreachable; // DATA frame type
             packet.writeVarInt(hdr_writer, b.len) catch unreachable;
-            try stream.send.writeData(hdr_fbs.getWritten());
+            try stream.send.writeData(hdr_fbs.buffered());
             try stream.send.writeData(b);
         }
 
@@ -404,8 +404,8 @@ pub const H3Connection = struct {
 
         var frame_buf: [32]u8 = undefined;
         var fbs = io.fixedBufferStream(&frame_buf);
-        try h3_frame.write(.{ .goaway = max_id }, fbs.writer());
-        try ctrl.writeData(fbs.getWritten());
+        try h3_frame.write(.{ .goaway = max_id }, &fbs);
+        try ctrl.writeData(fbs.buffered());
 
         self.local_goaway_id = max_id;
         self.shutdown_state = .going_away_initial;
@@ -427,8 +427,8 @@ pub const H3Connection = struct {
 
         var frame_buf: [32]u8 = undefined;
         var fbs = io.fixedBufferStream(&frame_buf);
-        try h3_frame.write(.{ .goaway = goaway_id }, fbs.writer());
-        try ctrl.writeData(fbs.getWritten());
+        try h3_frame.write(.{ .goaway = goaway_id }, &fbs);
+        try ctrl.writeData(fbs.buffered());
 
         self.local_goaway_id = goaway_id;
         self.shutdown_state = .going_away_final;
@@ -450,8 +450,8 @@ pub const H3Connection = struct {
 
         var frame_buf: [32]u8 = undefined;
         var fbs = io.fixedBufferStream(&frame_buf);
-        try h3_frame.write(.{ .goaway = goaway_id }, fbs.writer());
-        try ctrl.writeData(fbs.getWritten());
+        try h3_frame.write(.{ .goaway = goaway_id }, &fbs);
+        try ctrl.writeData(fbs.buffered());
 
         self.local_goaway_id = goaway_id;
         if (self.shutdown_state == .active or self.shutdown_state == .going_away_initial) {
@@ -510,8 +510,8 @@ pub const H3Connection = struct {
         try h3_frame.write(.{ .priority_update = .{
             .stream_id = stream_id,
             .field_value = fv_buf[0..fv_len],
-        } }, fbs.writer());
-        try ctrl.writeData(fbs.getWritten());
+        } }, &fbs);
+        try ctrl.writeData(fbs.buffered());
 
         // Also update local scheduling state
         if (self.quic_conn.streams.getStream(stream_id)) |stream| {
@@ -630,7 +630,7 @@ pub const H3Connection = struct {
             if (data.len == 0) continue;
 
             var fbs = io.fixedBufferStream(data);
-            const stream_type = h3_frame.readUniStreamType(fbs.reader()) catch |err| {
+            const stream_type = h3_frame.readUniStreamType(&fbs) catch |err| {
                 std.log.debug("H3 uni stream type parse error on stream {d}: {}", .{ stream_id, err });
                 continue;
             };
@@ -1477,7 +1477,7 @@ test "H3 frame error: malformed SETTINGS detected" {
     // A SETTINGS frame with incomplete varint value should fail
     var buf: [10]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    const writer = &fbs;
     // Write SETTINGS type (0x04) + length (3) + valid id varint + truncated value
     packet.writeVarInt(writer, 0x04) catch unreachable;
     packet.writeVarInt(writer, 3) catch unreachable;
@@ -1493,7 +1493,7 @@ test "H3 frame error: reserved HTTP/2 frame type" {
     // Type 0x02 (HTTP/2 PRIORITY) should be H3_FRAME_UNEXPECTED
     var buf: [4]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    const writer = &fbs;
     packet.writeVarInt(writer, 0x02) catch unreachable; // HTTP/2 PRIORITY type
     packet.writeVarInt(writer, 0) catch unreachable; // length 0
     const result = h3_frame.parse(buf[0..fbs.seek]);
@@ -1504,7 +1504,7 @@ test "H3 frame error: malformed GOAWAY varint" {
     // GOAWAY with invalid payload should be MalformedGoaway
     var buf: [4]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    const writer = &fbs;
     packet.writeVarInt(writer, 0x07) catch unreachable; // GOAWAY type
     packet.writeVarInt(writer, 1) catch unreachable; // length 1
     buf[fbs.seek] = 0xC0; // 8-byte varint prefix but only 1 byte available
@@ -1577,7 +1577,7 @@ fn injectBidiStreamData(quic_conn: *quic_connection.Connection, stream_id: u64, 
 // Build a SETTINGS frame with default (empty) settings: type=0x04, length=0x00
 fn buildSettingsFrame(buf: []u8) usize {
     var fbs = io.fixedBufferStream(buf);
-    h3_frame.write(.{ .settings = .{} }, fbs.writer()) catch unreachable;
+    h3_frame.write(.{ .settings = .{} }, &fbs) catch unreachable;
     return fbs.seek;
 }
 
@@ -1585,9 +1585,9 @@ fn buildSettingsFrame(buf: []u8) usize {
 fn buildControlStreamPayload(buf: []u8) usize {
     var fbs = io.fixedBufferStream(buf);
     // Stream type: control = 0x00
-    h3_frame.writeUniStreamType(fbs.writer(), .control) catch unreachable;
+    h3_frame.writeUniStreamType(&fbs, .control) catch unreachable;
     // Empty SETTINGS frame
-    h3_frame.write(.{ .settings = .{} }, fbs.writer()) catch unreachable;
+    h3_frame.write(.{ .settings = .{} }, &fbs) catch unreachable;
     return fbs.seek;
 }
 
@@ -1624,14 +1624,14 @@ fn buildGetRequestFrame(buf: []u8) usize {
     const qpack_len = qpack.encodeHeaders(&headers, &qpack_buf) catch unreachable;
 
     var fbs = io.fixedBufferStream(buf);
-    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer()) catch unreachable;
+    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs) catch unreachable;
     return fbs.seek;
 }
 
 // Build a DATA frame with given payload
 fn buildDataFrame(buf: []u8, payload: []const u8) usize {
     var fbs = io.fixedBufferStream(buf);
-    h3_frame.write(.{ .data = payload }, fbs.writer()) catch unreachable;
+    h3_frame.write(.{ .data = payload }, &fbs) catch unreachable;
     return fbs.seek;
 }
 
@@ -1750,8 +1750,8 @@ test "H3 integration: GOAWAY on control stream" {
     // Now inject GOAWAY(4) on the control stream
     var goaway_buf: [32]u8 = undefined;
     var goaway_fbs = io.fixedBufferStream(&goaway_buf);
-    h3_frame.write(.{ .goaway = 4 }, goaway_fbs.writer()) catch unreachable;
-    const goaway_data = goaway_fbs.getWritten();
+    h3_frame.write(.{ .goaway = 4 }, &goaway_fbs) catch unreachable;
+    const goaway_data = goaway_fbs.buffered();
 
     // Append to the control recv stream at next offset
     const ctrl_rs = quic_conn.streams.recv_streams.get(2).?;
@@ -1777,8 +1777,8 @@ test "H3 integration: DATA on control stream returns H3FrameUnexpected" {
     // Inject DATA frame on control stream
     var data_buf: [32]u8 = undefined;
     var data_fbs = io.fixedBufferStream(&data_buf);
-    h3_frame.write(.{ .data = "hello" }, data_fbs.writer()) catch unreachable;
-    const data_payload = data_fbs.getWritten();
+    h3_frame.write(.{ .data = "hello" }, &data_fbs) catch unreachable;
+    const data_payload = data_fbs.buffered();
 
     const ctrl_rs = quic_conn.streams.recv_streams.get(2).?;
     const offset = ctrl_rs.sorter.highestReceived();
@@ -1817,9 +1817,9 @@ test "H3 integration: GOAWAY before SETTINGS returns H3MissingSettings" {
     // Inject control stream type byte + GOAWAY (no SETTINGS first)
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    h3_frame.writeUniStreamType(fbs.writer(), .control) catch unreachable;
-    h3_frame.write(.{ .goaway = 0 }, fbs.writer()) catch unreachable;
-    try injectUniStreamData(&quic_conn, 2, fbs.getWritten(), false);
+    h3_frame.writeUniStreamType(&fbs, .control) catch unreachable;
+    h3_frame.write(.{ .goaway = 0 }, &fbs) catch unreachable;
+    try injectUniStreamData(&quic_conn, 2, fbs.buffered(), false);
 
     // First poll identifies control stream, buffers GOAWAY, then pollControlStream
     // finds GOAWAY before SETTINGS → H3MissingSettings error
@@ -2102,9 +2102,9 @@ test "H3 integration: CONNECT request produces connect_request event" {
 
     var frame_buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&frame_buf);
-    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer()) catch unreachable;
+    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs) catch unreachable;
 
-    try injectBidiStreamData(&quic_conn, 0, fbs.getWritten(), false);
+    try injectBidiStreamData(&quic_conn, 0, fbs.buffered(), false);
 
     const ev = try h3.poll();
     try testing.expect(ev != null);
@@ -2140,8 +2140,8 @@ test "H3 integration: sendConnectResponse writes headers without FIN" {
 
     var frame_buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&frame_buf);
-    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer()) catch unreachable;
-    try injectBidiStreamData(&quic_conn, 0, fbs.getWritten(), false);
+    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs) catch unreachable;
+    try injectBidiStreamData(&quic_conn, 0, fbs.buffered(), false);
 
     _ = try h3.poll(); // consume connect_request event
 
@@ -2174,9 +2174,9 @@ test "H3 integration: invalid headers (missing :path) closes connection" {
 
     var frame_buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&frame_buf);
-    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, fbs.writer()) catch unreachable;
+    h3_frame.write(.{ .headers = qpack_buf[0..qpack_len] }, &fbs) catch unreachable;
 
-    try injectBidiStreamData(&quic_conn, 0, fbs.getWritten(), false);
+    try injectBidiStreamData(&quic_conn, 0, fbs.buffered(), false);
 
     // Poll should close connection with H3_MESSAGE_ERROR
     const ev = h3.poll();
@@ -2232,9 +2232,9 @@ test "H3 integration: HTTP/2 frame type on bidi stream returns H3FrameUnexpected
     // Inject reserved HTTP/2 PRIORITY frame type (0x02) on bidi stream
     var buf: [4]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    packet.writeVarInt(fbs.writer(), 0x02) catch unreachable; // HTTP/2 PRIORITY type
-    packet.writeVarInt(fbs.writer(), 0) catch unreachable; // length 0
-    try injectBidiStreamData(&quic_conn, 0, fbs.getWritten(), false);
+    packet.writeVarInt(&fbs, 0x02) catch unreachable; // HTTP/2 PRIORITY type
+    packet.writeVarInt(&fbs, 0) catch unreachable; // length 0
+    try injectBidiStreamData(&quic_conn, 0, fbs.buffered(), false);
 
     const result = h3.poll();
     try testing.expectError(error.H3FrameUnexpected, result);

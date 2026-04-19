@@ -73,7 +73,7 @@ pub const ParsedSubgroupHeader = struct {
 };
 
 pub fn readSubgroupHeader(fbs: *io.FixedBufferStream([]const u8)) !ParsedSubgroupHeader {
-    const reader = fbs.reader();
+    const reader = fbs;
     const flags = try wire.readVarInt(reader);
     if (!codes.isSubgroupStreamType(flags)) return Error.InvalidStreamType;
 
@@ -95,7 +95,7 @@ pub fn readSubgroupHeader(fbs: *io.FixedBufferStream([]const u8)) !ParsedSubgrou
     const pri: ?track.Priority = if ((flags & codes.SUBGROUP_BIT_DEFAULT_PRIORITY) != 0)
         null
     else
-        reader.readByte() catch return wire.Error.BufferTooShort;
+        reader.takeByte() catch return wire.Error.BufferTooShort;
 
     return .{
         .header = .{
@@ -150,7 +150,7 @@ pub fn writeDatagramObject(writer: anytype, obj: DatagramObject) !void {
 
 pub fn readDatagramObject(data: []const u8) !DatagramObject {
     var fbs = io.fixedBufferStream(data);
-    const reader = fbs.reader();
+    const reader = &fbs;
     const flags = try wire.readVarInt(reader);
     if (!codes.isDatagramObjectType(flags)) return Error.InvalidDatagramType;
 
@@ -163,7 +163,7 @@ pub fn readDatagramObject(data: []const u8) !DatagramObject {
     const pri: ?track.Priority = if ((flags & codes.DGRAM_BIT_DEFAULT_PRIORITY) != 0)
         null
     else
-        reader.readByte() catch return wire.Error.BufferTooShort;
+        reader.takeByte() catch return wire.Error.BufferTooShort;
 
     const body: @FieldType(DatagramObject, "body") = if ((flags & codes.DGRAM_BIT_STATUS) != 0) blk: {
         const raw = try wire.readVarInt(reader);
@@ -191,7 +191,7 @@ pub fn writeFetchStreamHeader(writer: anytype, request_id: track.RequestId) !voi
 }
 
 pub fn readFetchStreamHeader(fbs: *io.FixedBufferStream([]const u8)) !track.RequestId {
-    const reader = fbs.reader();
+    const reader = fbs;
     const t = try wire.readVarInt(reader);
     if (t != codes.STREAM_FETCH) return Error.InvalidStreamType;
     return try wire.readVarInt(reader);
@@ -210,7 +210,7 @@ test "subgroup header round-trip — explicit subgroup with priority" {
         .end_of_group = false,
         .per_object_properties = true,
     };
-    try writeSubgroupHeader(fbs.writer(), h);
+    try writeSubgroupHeader(&fbs, h);
     const written = fbs.seek;
 
     var rb = io.fixedBufferStream(@as([]const u8, buf[0..written]));
@@ -235,7 +235,7 @@ test "subgroup header round-trip — zero subgroup, default priority, end-of-gro
         .end_of_group = true,
         .per_object_properties = false,
     };
-    try writeSubgroupHeader(fbs.writer(), h);
+    try writeSubgroupHeader(&fbs, h);
     var rb = io.fixedBufferStream(@as([]const u8, buf[0..fbs.seek]));
     const parsed = try readSubgroupHeader(&rb);
     try testing.expectEqual(codes.SubgroupIdMode.zero, parsed.id_mode);
@@ -261,7 +261,7 @@ test "datagram object round-trip with payload" {
         .end_of_group = false,
         .body = .{ .payload = "frame-data" },
     };
-    try writeDatagramObject(fbs.writer(), obj);
+    try writeDatagramObject(&fbs, obj);
     const got = try readDatagramObject(buf[0..fbs.seek]);
     try testing.expectEqual(@as(u64, 5), got.track_alias);
     try testing.expectEqual(@as(u64, 2), got.group);
@@ -281,7 +281,7 @@ test "datagram object with status and zero object id" {
         .end_of_group = false,
         .body = .{ .status = .does_not_exist },
     };
-    try writeDatagramObject(fbs.writer(), obj);
+    try writeDatagramObject(&fbs, obj);
     const got = try readDatagramObject(buf[0..fbs.seek]);
     try testing.expectEqual(@as(?u64, null), got.object);
     try testing.expectEqual(@as(?u8, null), got.publisher_priority);
@@ -297,7 +297,7 @@ test "datagram rejects status+end_of_group combination" {
 test "fetch stream header round-trip" {
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try writeFetchStreamHeader(fbs.writer(), 0xabcd);
+    try writeFetchStreamHeader(&fbs, 0xabcd);
     var rb = io.fixedBufferStream(@as([]const u8, buf[0..fbs.seek]));
     const rid = try readFetchStreamHeader(&rb);
     try testing.expectEqual(@as(u64, 0xabcd), rid);

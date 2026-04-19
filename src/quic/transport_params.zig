@@ -257,7 +257,7 @@ pub const TransportParams = struct {
     pub fn decode(data: []const u8) !TransportParams {
         var params = TransportParams{};
         var fbs = io.fixedBufferStream(data);
-        const reader = fbs.reader();
+        const reader = &fbs;
 
         while (fbs.seek < data.len) {
             const param_id = try packet.readVarInt(reader);
@@ -275,7 +275,7 @@ pub const TransportParams = struct {
                 @intFromEnum(ParamId.stateless_reset_token) => {
                     if (param_len != 16) return error.TransportParameterError;
                     var token: [16]u8 = undefined;
-                    _ = try reader.readAll(&token);
+                    _ = try reader.readSliceShort(&token);
                     params.stateless_reset_token = token;
                 },
                 @intFromEnum(ParamId.max_udp_payload_size) => {
@@ -311,18 +311,18 @@ pub const TransportParams = struct {
                 @intFromEnum(ParamId.preferred_address) => {
                     // IPv4 addr (4) + port (2) + IPv6 addr (16) + port (2) + CID len (1) + CID + reset token (16)
                     var pref = PreferredAddress{};
-                    _ = try reader.readAll(&pref.ipv4_addr);
+                    _ = try reader.readSliceShort(&pref.ipv4_addr);
                     var ipv4_port_bytes: [2]u8 = undefined;
-                    _ = try reader.readAll(&ipv4_port_bytes);
+                    _ = try reader.readSliceShort(&ipv4_port_bytes);
                     pref.ipv4_port = std.mem.bigToNative(u16, @bitCast(ipv4_port_bytes));
-                    _ = try reader.readAll(&pref.ipv6_addr);
+                    _ = try reader.readSliceShort(&pref.ipv6_addr);
                     var ipv6_port_bytes: [2]u8 = undefined;
-                    _ = try reader.readAll(&ipv6_port_bytes);
+                    _ = try reader.readSliceShort(&ipv6_port_bytes);
                     pref.ipv6_port = std.mem.bigToNative(u16, @bitCast(ipv6_port_bytes));
-                    pref.cid_len = try reader.readByte();
+                    pref.cid_len = try reader.takeByte();
                     if (pref.cid_len > 20) return error.TransportParameterError;
-                    _ = try reader.readAll(pref.cid_buf[0..pref.cid_len]);
-                    _ = try reader.readAll(&pref.stateless_reset_token);
+                    _ = try reader.readSliceShort(pref.cid_buf[0..pref.cid_len]);
+                    _ = try reader.readSliceShort(&pref.stateless_reset_token);
                     params.preferred_address = pref;
                 },
                 @intFromEnum(ParamId.active_connection_id_limit) => {
@@ -346,11 +346,11 @@ pub const TransportParams = struct {
                     if (param_len < 4 or (param_len % 4) != 0) {
                         fbs.seek = param_start + param_len;
                     } else {
-                        params.version_info_chosen = try reader.readInt(u32, .big);
+                        params.version_info_chosen = try reader.takeInt(u32, .big);
                         const avail_count = (param_len - 4) / 4;
                         const n: u8 = @intCast(@min(avail_count, 8));
                         for (0..n) |i| {
-                            params.version_info_available[i] = try reader.readInt(u32, .big);
+                            params.version_info_available[i] = try reader.takeInt(u32, .big);
                         }
                         params.version_info_available_count = n;
                         // Skip any extra versions beyond our buffer
@@ -392,9 +392,9 @@ test "TransportParams: encode and decode roundtrip" {
 
     var buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try original.encode(fbs.writer());
+    try original.encode(&fbs);
 
-    const encoded = fbs.getWritten();
+    const encoded = fbs.buffered();
     const decoded = try TransportParams.decode(encoded);
 
     try testing.expectEqual(original.max_idle_timeout, decoded.max_idle_timeout);
@@ -419,10 +419,10 @@ test "TransportParams: encode empty params" {
     const params = TransportParams{};
     var buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try params.encode(fbs.writer());
+    try params.encode(&fbs);
 
     // Empty params should produce minimal output
-    const encoded = fbs.getWritten();
+    const encoded = fbs.buffered();
     const decoded = try TransportParams.decode(encoded);
 
     try testing.expectEqual(@as(u64, 65527), decoded.max_udp_payload_size);
@@ -447,9 +447,9 @@ test "TransportParams: preferred_address roundtrip" {
 
     var buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try original.encode(fbs.writer());
+    try original.encode(&fbs);
 
-    const decoded = try TransportParams.decode(fbs.getWritten());
+    const decoded = try TransportParams.decode(fbs.buffered());
     try testing.expect(decoded.preferred_address != null);
 
     const dp = decoded.preferred_address.?;
@@ -485,9 +485,9 @@ test "TransportParams: disable_active_migration roundtrip" {
 
     var buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try original.encode(fbs.writer());
+    try original.encode(&fbs);
 
-    const decoded = try TransportParams.decode(fbs.getWritten());
+    const decoded = try TransportParams.decode(fbs.buffered());
     try testing.expect(decoded.disable_active_migration);
     try testing.expectEqual(@as(u64, 10000), decoded.max_idle_timeout);
 }
@@ -502,9 +502,9 @@ test "TransportParams: version_information roundtrip" {
 
     var buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try original.encode(fbs.writer());
+    try original.encode(&fbs);
 
-    const decoded = try TransportParams.decode(fbs.getWritten());
+    const decoded = try TransportParams.decode(fbs.buffered());
     try testing.expectEqual(protocol.QUIC_V1, decoded.version_info_chosen);
     try testing.expectEqual(@as(u8, 2), decoded.version_info_available_count);
     try testing.expectEqual(protocol.QUIC_V2, decoded.version_info_available[0]);
@@ -523,9 +523,9 @@ test "TransportParams: connection IDs roundtrip" {
 
     var buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try original.encode(fbs.writer());
+    try original.encode(&fbs);
 
-    const decoded = try TransportParams.decode(fbs.getWritten());
+    const decoded = try TransportParams.decode(fbs.buffered());
     try testing.expect(decoded.initial_source_connection_id != null);
     try testing.expectEqualSlices(u8, &scid, decoded.initial_source_connection_id.?);
     try testing.expect(decoded.original_destination_connection_id != null);
@@ -541,10 +541,10 @@ test "TransportParams: greasing roundtrip" {
 
     var buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try original.encode(fbs.writer());
+    try original.encode(&fbs);
 
     // Decode should succeed — unknown params (greased) are silently ignored
-    const decoded = try TransportParams.decode(fbs.getWritten());
+    const decoded = try TransportParams.decode(fbs.buffered());
     try std.testing.expectEqual(@as(u64, 30000), decoded.max_idle_timeout);
     try std.testing.expectEqual(@as(u64, 1048576), decoded.initial_max_data);
 
@@ -552,7 +552,7 @@ test "TransportParams: greasing roundtrip" {
     // but both must decode to same semantic values
     var buf2: [512]u8 = undefined;
     var fbs2 = io.fixedBufferStream(&buf2);
-    try original.encode(fbs2.writer());
-    const decoded2 = try TransportParams.decode(fbs2.getWritten());
+    try original.encode(&fbs2);
+    const decoded2 = try TransportParams.decode(fbs2.buffered());
     try std.testing.expectEqual(@as(u64, 30000), decoded2.max_idle_timeout);
 }

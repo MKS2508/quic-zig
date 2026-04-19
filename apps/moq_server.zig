@@ -83,7 +83,7 @@ const MoqServerHandler = struct {
 
                 var buf: [256]u8 = undefined;
                 var fbs = io_compat.fixedBufferStream(&buf);
-                moq_msg.writeSetup(fbs.writer(), .{
+                moq_msg.writeSetup(&fbs, .{
                     .implementation = "quic-zig/moq-server",
                 }) catch return;
                 send_stream.writeData(buf[0..fbs.seek]) catch return;
@@ -122,7 +122,7 @@ const MoqServerHandler = struct {
         const stream = conn.streams.getStream(stream_id) orelse return;
         var buf: [256]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
-        moq_msg.writeSubscribeOk(fbs.writer(), .{
+        moq_msg.writeSubscribeOk(&fbs, .{
             .track_alias = alias,
         }) catch return;
         stream.send.writeData(buf[0..fbs.seek]) catch return;
@@ -151,7 +151,7 @@ const MoqServerHandler = struct {
 
             var buf: [256]u8 = undefined;
             var fbs = io_compat.fixedBufferStream(&buf);
-            const w = fbs.writer();
+            const w = &fbs;
 
             moq_obj.writeSubgroupHeader(w, .{
                 .track_alias = sub.track_alias,

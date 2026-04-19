@@ -1,23 +1,18 @@
-//! Zig 0.15-style `fixedBufferStream` over a fixed []u8 buffer.
+//! Fixed-buffer stream over a `[]u8` / `[]const u8`, exposing the
+//! `std.Io.Reader` / `std.Io.Writer`-compatible method surface used by
+//! our encode/decode paths (`takeByte`, `takeInt`, `readSliceAll`,
+//! `readSliceShort`, `takeArray`, `writeAll`, `writeByte`, `writeInt`,
+//! `buffered`).
 //!
-//! The 0.16 stdlib dropped `std.io.fixedBufferStream` in favor of
-//! `std.Io.Reader.fixed` / `std.Io.Writer.fixed`. This shim bridges the
-//! remaining call sites while the migration is in progress. The FBS
-//! struct itself exposes the `*std.Io.Reader`-compatible surface
-//! (field names `seek`/`buffer`, methods `takeByte`/`takeInt`/
-//! `readSliceAll`/`takeArray`/`writeByte`/`writeAll`/`writeInt`/
-//! `buffered`) so migrating a call site is literally replacing
-//! `var fbs = io.fixedBufferStream(...)` with
-//! `var reader: std.Io.Reader = .fixed(...)` — the surrounding method
-//! calls stay the same.
-//!
-//! Legacy helpers (`.reader()`, `.writer()`, `.pos` as `getPos()`,
-//! `.getWritten()`, `.seekBy()`, `.readByte`, `.readInt`, `.readNoEof`,
-//! `.readBytesNoEof`, `.readAll`) remain during the transition.
+//! Zig 0.16 replaced `std.io.fixedBufferStream` with
+//! `std.Io.Reader.fixed` / `std.Io.Writer.fixed`, but the stdlib split
+//! reader and writer into separate types — inconvenient for the many
+//! call sites that read and write the same buffer. This keeps a unified
+//! FBS with the 0.16 method names, so callers can pass `&fbs` to any
+//! `anytype` reader/writer parameter.
 
 const std = @import("std");
 const mem = std.mem;
-const builtin = std.builtin;
 
 pub fn FixedBufferStream(comptime Buffer: type) type {
     comptime std.debug.assert(@typeInfo(Buffer) == .pointer);
@@ -33,8 +28,6 @@ pub fn FixedBufferStream(comptime Buffer: type) type {
 
         pub const ReadError = error{};
         pub const WriteError = error{NoSpaceLeft};
-
-        // --- std.Io.Reader-compatible (takes *Self) -------------------------
 
         pub fn takeByte(self: *Self) error{EndOfStream}!u8 {
             if (self.seek >= self.buffer.len) return error.EndOfStream;
@@ -71,8 +64,6 @@ pub fn FixedBufferStream(comptime Buffer: type) type {
             return ptr;
         }
 
-        // --- std.Io.Writer-compatible forwarders (mutable buffer only) ------
-
         pub fn writeAll(self: *Self, bytes: []const u8) WriteError!void {
             if (comptime is_const) return;
             if (bytes.len > self.buffer.len - self.seek) return error.NoSpaceLeft;
@@ -99,110 +90,9 @@ pub fn FixedBufferStream(comptime Buffer: type) type {
             return self.buffer[0..self.seek];
         }
 
-        // --- Inner Reader / Writer wrappers (legacy 0.15 API) ---------------
-        // Retained so `const reader = fbs.reader();` call sites keep working.
-        // Methods dispatch through the stored *Self pointer; fields `.seek`
-        // and `.buffer` are NOT exposed here — access those via the
-        // FBS itself.
-
-        pub const Reader = struct {
-            fbs: *Self,
-
-            pub fn takeByte(self: Reader) error{EndOfStream}!u8 {
-                return self.fbs.takeByte();
-            }
-            pub fn takeInt(self: Reader, comptime T: type, endian: std.builtin.Endian) error{EndOfStream}!T {
-                return self.fbs.takeInt(T, endian);
-            }
-            pub fn readSliceAll(self: Reader, dest: []u8) error{EndOfStream}!void {
-                return self.fbs.readSliceAll(dest);
-            }
-            pub fn readSliceShort(self: Reader, dest: []u8) ReadError!usize {
-                return self.fbs.readSliceShort(dest);
-            }
-            pub fn takeArray(self: Reader, comptime n: usize) error{EndOfStream}!*[n]u8 {
-                return self.fbs.takeArray(n);
-            }
-            // 0.15 aliases
-            pub fn readByte(self: Reader) error{EndOfStream}!u8 {
-                return self.fbs.takeByte();
-            }
-            pub fn readInt(self: Reader, comptime T: type, endian: std.builtin.Endian) error{EndOfStream}!T {
-                return self.fbs.takeInt(T, endian);
-            }
-            pub fn readNoEof(self: Reader, dest: []u8) error{EndOfStream}!void {
-                return self.fbs.readSliceAll(dest);
-            }
-            pub fn readBytesNoEof(self: Reader, comptime n: usize) error{EndOfStream}![n]u8 {
-                var buf: [n]u8 = undefined;
-                try self.fbs.readSliceAll(&buf);
-                return buf;
-            }
-            pub fn readAll(self: Reader, dest: []u8) ReadError!usize {
-                return self.fbs.readSliceShort(dest);
-            }
-        };
-
-        pub const Writer = struct {
-            fbs: *Self,
-
-            pub fn writeAll(self: Writer, bytes: []const u8) WriteError!void {
-                return self.fbs.writeAll(bytes);
-            }
-            pub fn writeByte(self: Writer, byte: u8) WriteError!void {
-                return self.fbs.writeByte(byte);
-            }
-            pub fn writeInt(self: Writer, comptime T: type, value: T, endian: std.builtin.Endian) WriteError!void {
-                return self.fbs.writeInt(T, value, endian);
-            }
-        };
-
-        pub fn reader(self: *Self) Reader {
-            return .{ .fbs = self };
-        }
-
-        pub fn writer(self: *Self) Writer {
-            return .{ .fbs = self };
-        }
-
-        pub fn getWritten(self: *const Self) Slice {
-            return self.buffered();
-        }
-
-        pub fn getPos(self: *const Self) usize {
-            return self.seek;
-        }
-
-        pub fn seekTo(self: *Self, new_seek: usize) void {
-            self.seek = @min(new_seek, self.buffer.len);
-        }
-
         pub fn seekBy(self: *Self, offset: usize) error{NoSpaceLeft}!void {
             if (offset > self.buffer.len - self.seek) return error.NoSpaceLeft;
             self.seek += offset;
-        }
-
-        pub fn getEndPos(self: *const Self) usize {
-            return self.buffer.len;
-        }
-
-        // Legacy 0.15 method-name forwarders on FBS itself.
-        pub fn readByte(self: *Self) error{EndOfStream}!u8 {
-            return takeByte(self);
-        }
-        pub fn readInt(self: *Self, comptime T: type, endian: std.builtin.Endian) error{EndOfStream}!T {
-            return takeInt(self, T, endian);
-        }
-        pub fn readNoEof(self: *Self, dest: []u8) error{EndOfStream}!void {
-            return readSliceAll(self, dest);
-        }
-        pub fn readBytesNoEof(self: *Self, comptime n: usize) error{EndOfStream}![n]u8 {
-            var buf: [n]u8 = undefined;
-            try readSliceAll(self, &buf);
-            return buf;
-        }
-        pub fn readAll(self: *Self, dest: []u8) ReadError!usize {
-            return readSliceShort(self, dest);
         }
     };
 }

@@ -35,7 +35,7 @@ pub fn parse(data: []const u8) !struct { capsule: Capsule, consumed: usize } {
     if (data.len == 0) return error.BufferTooShort;
 
     var fbs = io.fixedBufferStream(data);
-    const reader = fbs.reader();
+    const reader = &fbs;
 
     // Capsule Type (varint)
     const capsule_type = packet.readVarInt(reader) catch return error.BufferTooShort;
@@ -110,9 +110,9 @@ test "parse DATAGRAM capsule" {
     var fbs = io.fixedBufferStream(&buf);
 
     const payload = "hello capsule";
-    try writeDatagram(fbs.writer(), payload);
+    try writeDatagram(&fbs, payload);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(@as(u64, 0x00), result.capsule.capsule_type);
@@ -124,9 +124,9 @@ test "parse empty DATAGRAM capsule" {
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
 
-    try writeDatagram(fbs.writer(), "");
+    try writeDatagram(&fbs, "");
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(@as(u64, 0x00), result.capsule.capsule_type);
@@ -139,9 +139,9 @@ test "write and parse generic capsule" {
 
     const custom_type: u64 = 0x1234;
     const payload = "custom data";
-    try write(fbs.writer(), custom_type, payload);
+    try write(&fbs, custom_type, payload);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(custom_type, result.capsule.capsule_type);
@@ -156,22 +156,22 @@ test "parse buffer too short - empty" {
 test "parse buffer too short - truncated value" {
     var buf: [16]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    const w = &fbs;
 
     try packet.writeVarInt(w, 0x00); // type: DATAGRAM
     try packet.writeVarInt(w, 100); // length: 100 (but no payload follows)
 
-    const result = parse(fbs.getWritten());
+    const result = parse(fbs.buffered());
     try testing.expectError(error.BufferTooShort, result);
 }
 
 test "parse buffer too short - type only" {
     var buf: [8]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try packet.writeVarInt(fbs.writer(), 0x00);
+    try packet.writeVarInt(&fbs, 0x00);
 
     // Only type varint, no length — should fail
-    const result = parse(fbs.getWritten());
+    const result = parse(fbs.buffered());
     // This might parse type=0, length=? depending on varint encoding
     // A single byte 0x00 is type=0 but no length byte follows
     // Actually 0x00 encodes as 1-byte varint. Next readVarInt needs at least 1 more byte.
@@ -198,14 +198,14 @@ test "isReservedCapsuleType" {
 test "CapsuleIterator - multiple capsules" {
     var buf: [512]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    const w = &fbs;
 
     // Write 3 capsules
     try writeDatagram(w, "first");
     try writeDatagram(w, "second");
     try write(w, 0xFF, "custom");
 
-    const data = fbs.getWritten();
+    const data = fbs.buffered();
     var iter = CapsuleIterator.init(data);
 
     // First capsule
@@ -231,12 +231,12 @@ test "CapsuleIterator - multiple capsules" {
 test "CapsuleIterator - partial trailing data" {
     var buf: [256]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    const w = &fbs;
 
     try writeDatagram(w, "complete");
 
     var data_arr: [256]u8 = undefined;
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     @memcpy(data_arr[0..written.len], written);
     // Add incomplete trailing capsule: type byte only
     data_arr[written.len] = 0x00;
@@ -260,9 +260,9 @@ test "large capsule payload" {
     // Write a capsule with 8000-byte payload
     var payload: [8000]u8 = undefined;
     @memset(&payload, 0xAB);
-    try writeDatagram(fbs.writer(), &payload);
+    try writeDatagram(&fbs, &payload);
 
-    const written = fbs.getWritten();
+    const written = fbs.buffered();
     const result = try parse(written);
 
     try testing.expectEqual(@as(u64, 0x00), result.capsule.capsule_type);

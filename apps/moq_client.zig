@@ -79,7 +79,7 @@ const MoqClientHandler = struct {
 
         var buf: [256]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
-        moq_msg.writeSetup(fbs.writer(), .{
+        moq_msg.writeSetup(&fbs, .{
             .implementation = "quic-zig/moq",
         }) catch return;
         session.writeStream(ctrl, buf[0..fbs.seek]) catch return;
@@ -178,7 +178,7 @@ const MoqClientHandler = struct {
         var off: usize = 0;
         while (off < rest.len) {
             var obj_fbs = io_compat.fixedBufferStream(rest[off..]);
-            const obj_reader = obj_fbs.reader();
+            const obj_reader = &obj_fbs;
             const obj_id = moq_wire.readVarInt(obj_reader) catch break;
             const payload_len = moq_wire.readVarInt(obj_reader) catch break;
             const plen: usize = @intCast(payload_len);
@@ -204,7 +204,7 @@ const MoqClientHandler = struct {
 
             var buf: [512]u8 = undefined;
             var fbs = io_compat.fixedBufferStream(&buf);
-            moq_msg.writeSubscribe(fbs.writer(), .{
+            moq_msg.writeSubscribe(&fbs, .{
                 .track_namespace = ts.ns_parts,
                 .track_name = ts.name,
                 .subscriber_priority = 128,
@@ -240,7 +240,7 @@ const MoqClientHandler = struct {
 
         var buf: [512]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
-        moq_msg.writePublish(fbs.writer(), .{
+        moq_msg.writePublish(&fbs, .{
             .track_namespace = self.ns_parts,
             .track_name = self.track_name,
             .track_alias = 1,
@@ -265,7 +265,7 @@ const MoqClientHandler = struct {
 
         var buf: [256]u8 = undefined;
         var fbs = io_compat.fixedBufferStream(&buf);
-        const w = fbs.writer();
+        const w = &fbs;
         moq_obj.writeSubgroupHeader(w, .{
             .track_alias = 1,
             .group = self.group_id,

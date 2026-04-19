@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const net = @import("quic").net_compat;
+const net = @import("quic").sockaddr;
 const mem = std.mem;
 
 const lib = @import("quic");
@@ -385,10 +385,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             // Send as HTTP Structured Fields list of quoted strings (RFC 8941)
             var fbs = io_compat.fixedBufferStream(&proto_header_buf);
             for (client_protocols.items, 0..) |p, idx| {
-                if (idx > 0) fbs.writer().writeAll(", ") catch {};
-                fbs.writer().writeByte('"') catch {};
-                fbs.writer().writeAll(p) catch {};
-                fbs.writer().writeByte('"') catch {};
+                if (idx > 0) fbs.writeAll(", ") catch {};
+                fbs.writeByte('"') catch {};
+                fbs.writeAll(p) catch {};
+                fbs.writeByte('"') catch {};
             }
             proto_header_len = fbs.seek;
         }

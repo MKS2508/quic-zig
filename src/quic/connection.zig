@@ -2063,7 +2063,7 @@ pub const Connection = struct {
         _ = frame;
         // Create a temporary stream to measure how far parsing advances
         var fbs = io.fixedBufferStream(@constCast(buf));
-        const reader = fbs.reader();
+        const reader = &fbs;
         const frame_type = packet.readVarInt(reader) catch return 1;
 
         switch (frame_type) {
@@ -2155,7 +2155,7 @@ pub const Connection = struct {
                 // new_connection_id
                 _ = packet.readVarInt(reader) catch return fbs.seek;
                 _ = packet.readVarInt(reader) catch return fbs.seek;
-                const cid_len = reader.readByte() catch return fbs.seek;
+                const cid_len = reader.takeByte() catch return fbs.seek;
                 fbs.seekBy(cid_len) catch return fbs.seek;
                 fbs.seekBy(16) catch return fbs.seek; // stateless reset token
                 return fbs.seek;
@@ -4244,8 +4244,8 @@ pub fn connect(
         // Legacy: queue transport parameters as placeholder crypto data
         var tp_buf: [256]u8 = undefined;
         var tp_fbs = io.fixedBufferStream(&tp_buf);
-        try conn.local_params.encode(tp_fbs.writer());
-        const tp_data = tp_fbs.getWritten();
+        try conn.local_params.encode(&tp_fbs);
+        const tp_data = tp_fbs.buffered();
         const cs = conn.crypto_streams.getStream(0); // Initial level
         try cs.writeData(tp_data);
     }

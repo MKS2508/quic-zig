@@ -259,7 +259,7 @@ pub const PacketPacker = struct {
         // Account for output buffer size: encrypted output = fbs.seek + AEAD_TAG_LEN
         const effective_max = @min(self.max_packet_size, @min(tmp.len, buf.len -| AEAD_TAG_LEN));
         var fbs = io.fixedBufferStream(tmp[0..effective_max]);
-        const writer = fbs.writer();
+        const writer = &fbs;
 
         // Get packet number and encode it
         const pn = pkt_handler.nextPacketNumber(level);
@@ -648,7 +648,7 @@ pub const PacketPacker = struct {
         var tmp: [ABSOLUTE_MAX_PACKET_SIZE]u8 = undefined;
         const effective_max = @min(target_size, tmp.len);
         var fbs = io.fixedBufferStream(tmp[0..effective_max]);
-        const writer = fbs.writer();
+        const writer = &fbs;
 
         const pn = pkt_handler.nextPacketNumber(.application);
         const largest_acked = pkt_handler.getLargestAcked(.application);

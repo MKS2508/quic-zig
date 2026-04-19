@@ -636,7 +636,7 @@ pub fn retry(
     token: []u8,
     fbs: anytype,
 ) !void {
-    const writer = fbs.writer();
+    const writer = fbs;
     var hdr = Header{
         .version = header.version,
         .packet_type = PacketType.retry,
@@ -649,7 +649,7 @@ pub fn retry(
 
     try hdr.encode(writer);
 
-    const integrity_tag = try computeRetryIntegrityTag(fbs.getWritten(), header.dcid, header.version);
+    const integrity_tag = try computeRetryIntegrityTag(fbs.buffered(), header.dcid, header.version);
 
     try writer.writeAll(&integrity_tag);
 }
@@ -678,7 +678,7 @@ pub fn computeRetryIntegrityTag(
     // Use stack buffer: 1 (odcid_len) + 20 (max odcid) + ~1300 (max packet) = 1321
     var buf: [1400]u8 = undefined;
     var inner_fbs = io.fixedBufferStream(&buf);
-    const buf_writer = inner_fbs.writer();
+    const buf_writer = &inner_fbs;
     try buf_writer.writeByte(@intCast(odcid.len));
     try buf_writer.writeAll(odcid);
     try buf_writer.writeAll(packet_bytes_without_tag);
@@ -686,7 +686,7 @@ pub fn computeRetryIntegrityTag(
     const m = "";
     var c: [m.len]u8 = undefined;
     var tag: [crypto.Aead.tag_length]u8 = undefined;
-    crypto.Aead.encrypt(&c, &tag, m, inner_fbs.getWritten(), nonce, key);
+    crypto.Aead.encrypt(&c, &tag, m, inner_fbs.buffered(), nonce, key);
 
     return tag;
 }
@@ -735,7 +735,7 @@ pub fn generateRetryToken(
     // Build plaintext
     var plaintext: [TOKEN_MAX_PLAINTEXT_LEN]u8 = undefined;
     var pt_fbs = io.fixedBufferStream(&plaintext);
-    const pt_writer = pt_fbs.writer();
+    const pt_writer = &pt_fbs;
     try pt_writer.writeByte(@intCast(odcid.len));
     try pt_writer.writeAll(odcid);
     try pt_writer.writeByte(@intCast(retry_scid.len));
@@ -809,28 +809,28 @@ pub fn validateRetryToken(
 
     // Parse plaintext
     var pt_fbs = io.fixedBufferStream(plaintext[0..ct_len]);
-    const pt_reader = pt_fbs.reader();
+    const pt_reader = &pt_fbs;
 
     var result = ValidatedToken{};
 
     // Read ODCID
-    result.odcid_len = pt_reader.readByte() catch return null;
+    result.odcid_len = pt_reader.takeByte() catch return null;
     if (result.odcid_len > 20) return null;
-    _ = pt_reader.readAll(result.odcid_buf[0..result.odcid_len]) catch return null;
+    _ = pt_reader.readSliceShort(result.odcid_buf[0..result.odcid_len]) catch return null;
 
     // Read retry SCID
-    result.retry_scid_len = pt_reader.readByte() catch return null;
+    result.retry_scid_len = pt_reader.takeByte() catch return null;
     if (result.retry_scid_len > 20) return null;
-    _ = pt_reader.readAll(result.retry_scid_buf[0..result.retry_scid_len]) catch return null;
+    _ = pt_reader.readSliceShort(result.retry_scid_buf[0..result.retry_scid_len]) catch return null;
 
     // Read timestamp and check age
-    const timestamp = pt_reader.readInt(i64, ENDIAN) catch return null;
+    const timestamp = pt_reader.takeInt(i64, ENDIAN) catch return null;
     const now: i64 = @intCast(sys.nanoTimestamp());
     if (now - timestamp > TOKEN_MAX_AGE_NS or timestamp > now) return null;
 
     // Check address
     var addr_data: [14]u8 = undefined;
-    _ = pt_reader.readAll(&addr_data) catch return null;
+    _ = pt_reader.readSliceShort(&addr_data) catch return null;
     if (!std.mem.eql(u8, &addr_data, addrDataBytes(&client_addr))) return null;
 
     return result;
@@ -856,7 +856,7 @@ pub fn generateNewToken(
 
     var plaintext: [NEW_TOKEN_PLAINTEXT_LEN]u8 = undefined;
     var pt_fbs = io.fixedBufferStream(&plaintext);
-    const pt_writer = pt_fbs.writer();
+    const pt_writer = &pt_fbs;
     const now: i64 = @intCast(sys.nanoTimestamp());
     try pt_writer.writeInt(i64, now, ENDIAN);
     try pt_writer.writeAll(addrDataBytes(&client_addr));
@@ -900,14 +900,14 @@ pub fn validateNewToken(
     ) catch return false;
 
     var pt_fbs = io.fixedBufferStream(&plaintext);
-    const pt_reader = pt_fbs.reader();
+    const pt_reader = &pt_fbs;
 
-    const timestamp = pt_reader.readInt(i64, ENDIAN) catch return false;
+    const timestamp = pt_reader.takeInt(i64, ENDIAN) catch return false;
     const now: i64 = @intCast(sys.nanoTimestamp());
     if (now - timestamp > TOKEN_MAX_AGE_NS or timestamp > now) return false;
 
     var addr_data: [14]u8 = undefined;
-    _ = pt_reader.readAll(&addr_data) catch return false;
+    _ = pt_reader.readSliceShort(&addr_data) catch return false;
     if (!std.mem.eql(u8, &addr_data, addrDataBytes(&client_addr))) return false;
 
     return true;
@@ -973,29 +973,29 @@ test "QUIC: Variable-Length Integer Encoding" {
     {
         var buf: [8]u8 = undefined;
         var fbs = io.fixedBufferStream(&buf);
-        try writeVarInt(fbs.writer(), 37);
-        try std.testing.expectEqualSlices(u8, &[_]u8{0x25}, fbs.getWritten());
+        try writeVarInt(&fbs, 37);
+        try std.testing.expectEqualSlices(u8, &[_]u8{0x25}, fbs.buffered());
     }
     // 2-byte encoding
     {
         var buf: [8]u8 = undefined;
         var fbs = io.fixedBufferStream(&buf);
-        try writeVarInt(fbs.writer(), 15293);
-        try std.testing.expectEqualSlices(u8, &[_]u8{ 0x7b, 0xbd }, fbs.getWritten());
+        try writeVarInt(&fbs, 15293);
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 0x7b, 0xbd }, fbs.buffered());
     }
     // 4-byte encoding
     {
         var buf: [8]u8 = undefined;
         var fbs = io.fixedBufferStream(&buf);
-        try writeVarInt(fbs.writer(), 494878333);
-        try std.testing.expectEqualSlices(u8, &[_]u8{ 0x9d, 0x7f, 0x3e, 0x7d }, fbs.getWritten());
+        try writeVarInt(&fbs, 494878333);
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 0x9d, 0x7f, 0x3e, 0x7d }, fbs.buffered());
     }
     // 8-byte encoding
     {
         var buf: [8]u8 = undefined;
         var fbs = io.fixedBufferStream(&buf);
-        try writeVarInt(fbs.writer(), 151288809941952652);
-        try std.testing.expectEqualSlices(u8, &[_]u8{ 0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c }, fbs.getWritten());
+        try writeVarInt(&fbs, 151288809941952652);
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c }, fbs.buffered());
     }
 }
 
@@ -1011,19 +1011,19 @@ test "QUIC: varIntLength" {
 
 test "QUIC: Variable-Length Integer Decoding" {
     var fbs = io.fixedBufferStream(&[_]u8{ 0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c });
-    try std.testing.expect(151288809941952652 == try readVarInt(fbs.reader()));
+    try std.testing.expect(151288809941952652 == try readVarInt(&fbs));
 
     fbs = io.fixedBufferStream(&[_]u8{ 0x9d, 0x7f, 0x3e, 0x7d });
-    try std.testing.expect(494878333 == try readVarInt(fbs.reader()));
+    try std.testing.expect(494878333 == try readVarInt(&fbs));
 
     fbs = io.fixedBufferStream(&[_]u8{ 0x7b, 0xbd });
-    try std.testing.expect(15293 == try readVarInt(fbs.reader()));
+    try std.testing.expect(15293 == try readVarInt(&fbs));
 
     fbs = io.fixedBufferStream(&[_]u8{0x25});
-    try std.testing.expect(37 == try readVarInt(fbs.reader()));
+    try std.testing.expect(37 == try readVarInt(&fbs));
 
     fbs = io.fixedBufferStream(&[_]u8{ 0x40, 0x25 });
-    try std.testing.expect(37 == try readVarInt(fbs.reader()));
+    try std.testing.expect(37 == try readVarInt(&fbs));
 }
 
 //
@@ -1128,7 +1128,7 @@ test "Retry: integrity tag compute and verify" {
     // Build a minimal Retry-like packet (header only, no tag yet)
     var pkt_buf: [128]u8 = undefined;
     var pkt_fbs = io.fixedBufferStream(&pkt_buf);
-    const pkt_writer = pkt_fbs.writer();
+    const pkt_writer = &pkt_fbs;
 
     // First byte: Retry packet type
     try pkt_writer.writeByte(@intFromEnum(PacketType.retry));
@@ -1143,7 +1143,7 @@ test "Retry: integrity tag compute and verify" {
     // Token
     try pkt_writer.writeAll("some_token_data");
 
-    const pkt_without_tag = pkt_fbs.getWritten();
+    const pkt_without_tag = pkt_fbs.buffered();
 
     // Compute tag
     const tag = try computeRetryIntegrityTag(pkt_without_tag, odcid, 0x00000001);

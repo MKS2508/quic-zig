@@ -45,7 +45,7 @@ pub fn writeEnvelope(writer: anytype, msg_type: u64, payload: []const u8) !void 
 // plus total bytes consumed. Caller should slice `data` forward.
 pub fn parseEnvelope(data: []const u8) !struct { env: Envelope, consumed: usize } {
     var fbs = io.fixedBufferStream(data);
-    const t = try wire.readVarInt(fbs.reader());
+    const t = try wire.readVarInt(&fbs);
     if (codes.isReservedLegacyMessageType(t)) return Error.ReservedLegacyMessage;
     if (fbs.seek + 2 > data.len) return Error.BufferTooShort;
     const len = std.mem.readInt(u16, data[fbs.seek..][0..2], .big);
@@ -111,7 +111,7 @@ pub fn decodeSetupPayload(payload: []const u8) !SetupOptions {
 pub fn writeSetup(writer: anytype, opts: SetupOptions) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    try encodeSetupPayload(fbs.writer(), opts);
+    try encodeSetupPayload(&fbs, opts);
     try writeEnvelope(writer, codes.MSG_SETUP, scratch[0..fbs.seek]);
 }
 
@@ -122,7 +122,7 @@ pub const Goaway = struct { new_uri: []const u8 };
 pub fn writeGoaway(writer: anytype, g: Goaway) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    try wire.writeVarBytes(fbs.writer(), g.new_uri);
+    try wire.writeVarBytes(&fbs, g.new_uri);
     try writeEnvelope(writer, codes.MSG_GOAWAY, scratch[0..fbs.seek]);
 }
 
@@ -146,7 +146,7 @@ pub fn writeRequestOk(writer: anytype, r: RequestOk) !void {
     // Draft-17: no request_id, just an empty parameter list (count=0).
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    try wire.writeVarInt(fbs.writer(), 0); // param count
+    try wire.writeVarInt(&fbs, 0); // param count
     try writeEnvelope(writer, codes.MSG_REQUEST_OK, scratch[0..fbs.seek]);
 }
 
@@ -158,14 +158,14 @@ pub const RequestError = struct {
 pub fn writeRequestError(writer: anytype, e: RequestError) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    try wire.writeVarInt(fbs.writer(), e.error_code);
-    try wire.writeVarBytes(fbs.writer(), e.reason);
+    try wire.writeVarInt(&fbs, e.error_code);
+    try wire.writeVarBytes(&fbs, e.reason);
     try writeEnvelope(writer, codes.MSG_REQUEST_ERROR, scratch[0..fbs.seek]);
 }
 
 pub fn decodeRequestError(payload: []const u8) !RequestError {
     var fbs = io.fixedBufferStream(payload);
-    const code = try wire.readVarInt(fbs.reader());
+    const code = try wire.readVarInt(&fbs);
     const reason = try wire.readVarBytesZc(&fbs);
     return .{ .error_code = code, .reason = reason };
 }
@@ -201,7 +201,7 @@ pub const Subscribe = struct {
 pub fn writeSubscribe(writer: anytype, s: Subscribe) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    const w = fbs.writer();
+    const w = &fbs;
     try wire.writeVarInt(w, s.request_id);
     try wire.writeVarInt(w, 0); // required_request_id_delta
     try wire.writeTuple(w, s.track_namespace);
@@ -219,7 +219,7 @@ pub fn writeSubscribe(writer: anytype, s: Subscribe) !void {
     try wire.writeVarInt(w, PARAM_FILTER_TYPE - PARAM_SUBSCRIBER_PRIORITY); // delta = 1
     var ft_buf: [8]u8 = undefined;
     var ft_fbs = io.fixedBufferStream(&ft_buf);
-    try wire.writeVarInt(ft_fbs.writer(), @intFromEnum(s.filter_type));
+    try wire.writeVarInt(&ft_fbs, @intFromEnum(s.filter_type));
     try wire.writeVarInt(w, ft_fbs.seek); // length prefix
     try w.writeAll(ft_buf[0..ft_fbs.seek]); // varint bytes
     // GroupOrder: raw byte (u8 Param encoding)
@@ -231,7 +231,7 @@ pub fn writeSubscribe(writer: anytype, s: Subscribe) !void {
 
 pub fn decodeSubscribe(payload: []const u8) !Subscribe {
     var fbs = io.fixedBufferStream(payload);
-    const reader = fbs.reader();
+    const reader = &fbs;
 
     const request_id = try wire.readVarInt(reader);
     _ = try wire.readVarInt(reader); // required_request_id_delta
@@ -258,8 +258,8 @@ pub fn decodeSubscribe(payload: []const u8) !Subscribe {
         const key = if (i == 0) delta else prev_key + delta;
         prev_key = key;
         switch (key) {
-            PARAM_FORWARD => sub.forward = (reader.readByte() catch break) != 0,
-            PARAM_SUBSCRIBER_PRIORITY => sub.subscriber_priority = reader.readByte() catch break,
+            PARAM_FORWARD => sub.forward = (reader.takeByte() catch break) != 0,
+            PARAM_SUBSCRIBER_PRIORITY => sub.subscriber_priority = reader.takeByte() catch break,
             PARAM_FILTER_TYPE => {
                 // Length-prefixed bytes containing varint FilterType.
                 const ft_len = wire.readVarInt(reader) catch break;
@@ -270,7 +270,7 @@ pub fn decodeSubscribe(payload: []const u8) !Subscribe {
             },
             PARAM_GROUP_ORDER => {
                 // u8 Param encoding = raw byte.
-                sub.group_order = @enumFromInt(reader.readByte() catch break);
+                sub.group_order = @enumFromInt(reader.takeByte() catch break);
             },
             else => break,
         }
@@ -290,7 +290,7 @@ pub const SubscribeOk = struct {
 pub fn writeSubscribeOk(writer: anytype, s: SubscribeOk) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    const w = fbs.writer();
+    const w = &fbs;
     try wire.writeVarInt(w, s.track_alias);
     // Message parameters: count-prefixed, delta keys, type-specific values.
     if (s.group_order) |go| {
@@ -305,7 +305,7 @@ pub fn writeSubscribeOk(writer: anytype, s: SubscribeOk) !void {
 
 pub fn decodeSubscribeOk(payload: []const u8) !SubscribeOk {
     var fbs = io.fixedBufferStream(payload);
-    const alias = try wire.readVarInt(fbs.reader());
+    const alias = try wire.readVarInt(&fbs);
     var result = SubscribeOk{ .track_alias = alias };
     // Parse optional parameters.
     var it = wire.KvIterator.init(payload[fbs.seek..]);
@@ -329,7 +329,7 @@ pub const RequestUpdate = struct {
 pub fn writeRequestUpdate(writer: anytype, u: RequestUpdate) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    const w = fbs.writer();
+    const w = &fbs;
     try w.writeByte(u.subscriber_priority);
     try w.writeByte(@intFromEnum(u.group_order));
     if (u.end) |loc| {
@@ -351,7 +351,7 @@ pub const Publish = struct {
 pub fn writePublish(writer: anytype, p: Publish) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    const w = fbs.writer();
+    const w = &fbs;
     try wire.writeTuple(w, p.track_namespace);
     try wire.writeVarBytes(w, p.track_name);
     try wire.writeVarInt(w, p.track_alias);
@@ -361,7 +361,7 @@ pub fn writePublish(writer: anytype, p: Publish) !void {
 
 pub fn decodePublish(payload: []const u8) !Publish {
     var fbs = io.fixedBufferStream(payload);
-    const reader = fbs.reader();
+    const reader = &fbs;
     const count = try wire.readVarInt(reader);
     if (count > wire.MAX_TUPLE_PARTS) return Error.MalformedMessage;
     var ns_parts: [wire.MAX_TUPLE_PARTS][]const u8 = undefined;
@@ -370,7 +370,7 @@ pub fn decodePublish(payload: []const u8) !Publish {
     }
     const name = try wire.readVarBytesZc(&fbs);
     const alias = try wire.readVarInt(reader);
-    const pri = reader.readByte() catch return wire.Error.BufferTooShort;
+    const pri = reader.takeByte() catch return wire.Error.BufferTooShort;
     return .{
         .track_namespace = ns_parts[0..@as(usize, @intCast(count))],
         .track_name = name,
@@ -392,7 +392,7 @@ pub fn writePublishOk(writer: anytype, p: PublishOk) !void {
     var fbs = io.fixedBufferStream(&scratch);
     // Empty parameter list (count=0). Proper draft-17 PUBLISH_OK body encoding
     // will expand this when we need more fields.
-    try wire.writeVarInt(fbs.writer(), 0);
+    try wire.writeVarInt(&fbs, 0);
     try writeEnvelope(writer, codes.MSG_PUBLISH_OK, scratch[0..fbs.seek]);
 }
 
@@ -408,7 +408,7 @@ pub const PublishDone = struct {
 pub fn writePublishDone(writer: anytype, p: PublishDone) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    const w = fbs.writer();
+    const w = &fbs;
     try wire.writeVarInt(w, p.status_code);
     try wire.writeVarBytes(w, p.reason);
     if (p.final_group) |g| {
@@ -427,7 +427,7 @@ pub const PublishNamespace = struct {
 pub fn writePublishNamespace(writer: anytype, p: PublishNamespace) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    try wire.writeTuple(fbs.writer(), p.track_namespace_prefix);
+    try wire.writeTuple(&fbs, p.track_namespace_prefix);
     try writeEnvelope(writer, codes.MSG_PUBLISH_NAMESPACE, scratch[0..fbs.seek]);
 }
 
@@ -440,7 +440,7 @@ pub const SubscribeNamespace = struct {
 pub fn writeSubscribeNamespace(writer: anytype, s: SubscribeNamespace) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    try wire.writeTuple(fbs.writer(), s.track_namespace_prefix);
+    try wire.writeTuple(&fbs, s.track_namespace_prefix);
     try writeEnvelope(writer, codes.MSG_SUBSCRIBE_NAMESPACE, scratch[0..fbs.seek]);
 }
 
@@ -453,7 +453,7 @@ pub const Namespace = struct {
 pub fn writeNamespace(writer: anytype, n: Namespace) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    try wire.writeTuple(fbs.writer(), n.track_namespace);
+    try wire.writeTuple(&fbs, n.track_namespace);
     try writeEnvelope(writer, codes.MSG_NAMESPACE, scratch[0..fbs.seek]);
 }
 
@@ -477,7 +477,7 @@ pub const Fetch = struct {
 pub fn writeFetch(writer: anytype, f: Fetch) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    const w = fbs.writer();
+    const w = &fbs;
     try wire.writeTuple(w, f.track_namespace);
     try wire.writeVarBytes(w, f.track_name);
     try w.writeByte(f.subscriber_priority);
@@ -498,7 +498,7 @@ pub const FetchOk = struct {
 pub fn writeFetchOk(writer: anytype, f: FetchOk) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    try wire.writeVarInt(fbs.writer(), f.track_alias);
+    try wire.writeVarInt(&fbs, f.track_alias);
     try writeEnvelope(writer, codes.MSG_FETCH_OK, scratch[0..fbs.seek]);
 }
 
@@ -514,7 +514,7 @@ pub const TrackStatus = struct {
 pub fn writeTrackStatus(writer: anytype, t: TrackStatus) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    const w = fbs.writer();
+    const w = &fbs;
     try wire.writeTuple(w, t.track_namespace);
     try wire.writeVarBytes(w, t.track_name);
     try wire.writeVarInt(w, t.status_code);
@@ -534,7 +534,7 @@ pub const PublishBlocked = struct {
 pub fn writePublishBlocked(writer: anytype, p: PublishBlocked) !void {
     var scratch: [MAX_PAYLOAD_LEN]u8 = undefined;
     var fbs = io.fixedBufferStream(&scratch);
-    try wire.writeVarInt(fbs.writer(), p.track_alias);
+    try wire.writeVarInt(&fbs, p.track_alias);
     try writeEnvelope(writer, codes.MSG_PUBLISH_BLOCKED, scratch[0..fbs.seek]);
 }
 
@@ -543,7 +543,7 @@ pub fn writePublishBlocked(writer: anytype, p: PublishBlocked) !void {
 test "envelope round-trip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try writeEnvelope(fbs.writer(), codes.MSG_GOAWAY, "hello");
+    try writeEnvelope(&fbs, codes.MSG_GOAWAY, "hello");
     const parsed = try parseEnvelope(buf[0..fbs.seek]);
     try testing.expectEqual(codes.MSG_GOAWAY, parsed.env.type);
     try testing.expectEqualStrings("hello", parsed.env.payload);
@@ -559,7 +559,7 @@ test "envelope rejects legacy setup codes" {
 test "SETUP round-trip with path + implementation" {
     var buf: [128]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try writeSetup(fbs.writer(), .{
+    try writeSetup(&fbs, .{
         .path = "/moq",
         .implementation = "quic-zig/moq/0",
         .max_auth_token_cache_size = 256,
@@ -576,7 +576,7 @@ test "SETUP round-trip with path + implementation" {
 test "GOAWAY round-trip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try writeGoaway(fbs.writer(), .{ .new_uri = "https://other.example/moq" });
+    try writeGoaway(&fbs, .{ .new_uri = "https://other.example/moq" });
     const p = try parseEnvelope(buf[0..fbs.seek]);
     try testing.expectEqual(codes.MSG_GOAWAY, p.env.type);
     const g = try decodeGoaway(p.env.payload);
@@ -586,7 +586,7 @@ test "GOAWAY round-trip" {
 test "REQUEST_ERROR round-trip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try writeRequestError(fbs.writer(), .{
+    try writeRequestError(&fbs, .{
         .error_code = codes.ERR_UNAUTHORIZED,
         .reason = "no token",
     });
@@ -600,7 +600,7 @@ test "SUBSCRIBE round-trip" {
     var buf: [256]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
     const ns = [_][]const u8{ "moq", "demo" };
-    try writeSubscribe(fbs.writer(), .{
+    try writeSubscribe(&fbs, .{
         .track_namespace = &ns,
         .track_name = "video",
         .subscriber_priority = 128,
@@ -621,7 +621,7 @@ test "SUBSCRIBE round-trip" {
 test "SUBSCRIBE_OK round-trip" {
     var buf: [64]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
-    try writeSubscribeOk(fbs.writer(), .{
+    try writeSubscribeOk(&fbs, .{
         .track_alias = 42,
         .group_order = .descending,
     });
@@ -635,7 +635,7 @@ test "PUBLISH round-trip" {
     var buf: [256]u8 = undefined;
     var fbs = io.fixedBufferStream(&buf);
     const ns = [_][]const u8{ "moq", "demo" };
-    try writePublish(fbs.writer(), .{
+    try writePublish(&fbs, .{
         .track_namespace = &ns,
         .track_name = "video",
         .track_alias = 7,
