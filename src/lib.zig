@@ -1,6 +1,6 @@
 // Public API re-exports for the quic-zig library.
 pub const sys = @import("sys.zig");
-pub const net_compat = @import("net_compat.zig");
+pub const sockaddr = @import("sockaddr.zig");
 pub const io_compat = @import("io_compat.zig");
 pub const packet = @import("quic/packet.zig");
 pub const frame = @import("quic/frame.zig");

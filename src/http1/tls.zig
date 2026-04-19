@@ -8,7 +8,6 @@
 
 const std = @import("std");
 const sys = @import("../sys.zig");
-const net_compat = @import("../net_compat.zig");
 const crypto = std.crypto;
 const posix = std.posix;
 const net = std.net;

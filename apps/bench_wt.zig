@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const net = @import("quic").net_compat;
+const net = @import("quic").sockaddr;
 
 // Suppress verbose QUIC/TLS debug logging during benchmarks
 pub const std_options: std.Options = .{

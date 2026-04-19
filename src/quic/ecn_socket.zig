@@ -1,6 +1,6 @@
 const std = @import("std");
 const sys = @import("../sys.zig");
-const net = @import("../net_compat.zig");
+const net = @import("../sockaddr.zig");
 const posix = std.posix;
 const builtin = @import("builtin");
 

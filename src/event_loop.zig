@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 const log = std.log.scoped(.event_loop);
 const xev_mod = @import("xev");
 const sys = @import("sys.zig");
-const net = @import("net_compat.zig");
+const net = @import("sockaddr.zig");
 const io_compat = @import("io_compat.zig");
 
 // Default backend: epoll on Linux, kqueue on macOS.

@@ -13,7 +13,7 @@ const posix = std.posix;
 
 const lib = @import("quic");
 const sys = lib.sys;
-const net = lib.net_compat;
+const net = lib.sockaddr;
 const connection = lib.connection;
 const connection_manager = lib.connection_manager;
 const tls13 = lib.tls13;

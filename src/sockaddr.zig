@@ -1,18 +1,17 @@
-//! Address parsing and sockaddr-backed IP address types, replacing the
-//! 0.15-era `std.net.Address` that Zig 0.16 removed (networking moved
-//! under `std.Io.net` with an incompatible layout that does not fit our
-//! raw-syscall interface).
+//! Sockaddr-backed IP address type, replacing the 0.15-era
+//! `std.net.Address` that Zig 0.16 removed (networking moved under
+//! `std.Io.net` with a pure-struct layout that's incompatible with the
+//! `sendmsg`/`recvmsg`/`bind` syscall interface we use throughout).
 //!
-//! Adapted from Zig 0.15.2 `std/net.zig` to work against the 0.16
-//! `std.posix.sockaddr` types. Unix sockets intentionally dropped
-//! (we don't need them). Cross-platform: any target that exposes
-//! `std.posix.sockaddr.in` and `.in6` will work — no OS-specific
-//! branches below this line.
+//! `Address` is an `extern union` over `posix.sockaddr` / `.in` / `.in6`
+//! so we can `@ptrCast(&addr.any)` straight into syscalls. Ports are
+//! stored in network byte order. Adapted from Zig 0.15.2 `std/net.zig`.
+//! Cross-platform: any target exposing `std.posix.sockaddr.in` / `.in6`
+//! works — no OS-specific branches below this line.
 
 const std = @import("std");
 const mem = std.mem;
 const posix = std.posix;
-const native_endian = @import("builtin").cpu.arch.endian();
 
 pub const IPv4ParseError = error{
     Overflow,
@@ -58,28 +57,8 @@ pub const Address = extern union {
         return .{ .in6 = try Ip6Address.parse(buf, port) };
     }
 
-    /// Compat alias for the 0.15 `resolveIp`. Without an `Io`-backed DNS
-    /// resolver we can only do pure numeric parsing here — hostname
-    /// resolution belongs in a separate, explicitly-async code path.
-    pub fn resolveIp(name: []const u8, port: u16) !Address {
-        return parseIp(name, port);
-    }
-
     pub fn initIp4(addr: [4]u8, port: u16) Address {
         return .{ .in = Ip4Address.init(addr, port) };
-    }
-
-    pub fn initIp6(addr: [16]u8, port: u16, flowinfo: u32, scope_id: u32) Address {
-        return .{ .in6 = Ip6Address.init(addr, port, flowinfo, scope_id) };
-    }
-
-    pub fn initPosix(addr: *align(4) const posix.sockaddr) Address {
-        var sa: Address = undefined;
-        @memcpy(
-            @as([*]u8, @ptrCast(&sa))[0..@sizeOf(posix.sockaddr)],
-            @as([*]const u8, @ptrCast(addr))[0..@sizeOf(posix.sockaddr)],
-        );
-        return sa;
     }
 
     pub fn getPort(self: Address) u16 {
@@ -88,20 +67,6 @@ pub const Address = extern union {
             posix.AF.INET6 => self.in6.getPort(),
             else => unreachable,
         };
-    }
-
-    pub fn setPort(self: *Address, port: u16) void {
-        switch (self.any.family) {
-            posix.AF.INET => self.in.setPort(port),
-            posix.AF.INET6 => self.in6.setPort(port),
-            else => unreachable,
-        }
-    }
-
-    pub fn eql(a: Address, b: Address) bool {
-        const a_bytes = @as([*]const u8, @ptrCast(&a.any))[0..a.getOsSockLen()];
-        const b_bytes = @as([*]const u8, @ptrCast(&b.any))[0..b.getOsSockLen()];
-        return mem.eql(u8, a_bytes, b_bytes);
     }
 
     pub fn getOsSockLen(self: Address) posix.socklen_t {
@@ -169,10 +134,6 @@ pub const Ip4Address = extern struct {
 
     pub fn getPort(self: Ip4Address) u16 {
         return mem.bigToNative(u16, self.sa.port);
-    }
-
-    pub fn setPort(self: *Ip4Address, port: u16) void {
-        self.sa.port = mem.nativeToBig(u16, port);
     }
 
     pub fn getOsSockLen(self: Ip4Address) posix.socklen_t {
@@ -288,23 +249,8 @@ pub const Ip6Address = extern struct {
         }
     }
 
-    pub fn init(addr: [16]u8, port: u16, flowinfo: u32, scope_id: u32) Ip6Address {
-        return .{
-            .sa = .{
-                .addr = addr,
-                .port = mem.nativeToBig(u16, port),
-                .flowinfo = flowinfo,
-                .scope_id = scope_id,
-            },
-        };
-    }
-
     pub fn getPort(self: Ip6Address) u16 {
         return mem.bigToNative(u16, self.sa.port);
-    }
-
-    pub fn setPort(self: *Ip6Address, port: u16) void {
-        self.sa.port = mem.nativeToBig(u16, port);
     }
 
     pub fn getOsSockLen(self: Ip6Address) posix.socklen_t {

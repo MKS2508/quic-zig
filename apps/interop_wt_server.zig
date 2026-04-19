@@ -17,7 +17,7 @@ const posix = std.posix;
 const mem = std.mem;
 
 const lib = @import("quic");
-const net = lib.net_compat;
+const net = lib.sockaddr;
 const sys = lib.sys;
 const connection = lib.connection;
 const connection_manager = lib.connection_manager;

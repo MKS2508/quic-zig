@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const net = @import("quic").net_compat;
+const net = @import("quic").sockaddr;
 const quic = @import("quic");
 const sys = quic.sys;
 const quic_lb = quic.quic_lb;

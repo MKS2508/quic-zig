@@ -1,6 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
-const net = @import("quic").net_compat;
+const net = @import("quic").sockaddr;
 
 pub const std_options: std.Options = .{ .log_level = .err };
 

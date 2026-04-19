@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows dropped during Zig 0.16 port — src/sys.zig, net_compat, and
+        # Windows dropped during Zig 0.16 port — src/sys.zig, sockaddr, and
         # the libxev dep have @compileError branches for Windows pending a
         # proper Winsock implementation.
         os: [ubuntu-latest, macos-latest]

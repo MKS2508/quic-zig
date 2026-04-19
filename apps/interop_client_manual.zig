@@ -14,7 +14,7 @@ const mem = std.mem;
 
 const lib = @import("quic");
 const sys = lib.sys;
-const net = lib.net_compat;
+const net = lib.sockaddr;
 const connection = lib.connection;
 const quic_crypto = lib.crypto;
 const tls13 = lib.tls13;

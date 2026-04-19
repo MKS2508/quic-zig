@@ -12,7 +12,7 @@ const std = @import("std");
 const posix = std.posix;
 const log = std.log.scoped(.http1);
 const sys = @import("../sys.zig");
-const net = @import("../net_compat.zig");
+const net = @import("../sockaddr.zig");
 const tls = @import("tls.zig");
 const tls13 = @import("../quic/tls13.zig");
 

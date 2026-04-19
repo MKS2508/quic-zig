@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const net = @import("quic").net_compat;
+const net = @import("quic").sockaddr;
 const mem = std.mem;
 
 const lib = @import("quic");
