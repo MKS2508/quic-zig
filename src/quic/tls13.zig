@@ -1,7 +1,7 @@
 // TLS 1.3 handshake for QUIC (RFC 8446 + RFC 9001)
 //
 // Supports TLS_AES_128_GCM_SHA256 (0x1301) only.
-// ECDSA P-256 for signatures, X25519 for key exchange.
+// ECDSA P-256 or Ed25519 for signatures, X25519 for key exchange.
 // X.509 certificate chain validation via std.crypto.Certificate.
 
 const std = @import("std");
@@ -21,6 +21,7 @@ const Sha384 = crypto.hash.sha2.Sha384;
 const Sha512 = crypto.hash.sha2.Sha512;
 const X25519 = crypto.dh.X25519;
 const EcdsaP256Sha256 = crypto.sign.ecdsa.EcdsaP256Sha256;
+const Ed25519 = crypto.sign.Ed25519;
 const Aes128Gcm = crypto.aead.aes_gcm.Aes128Gcm;
 
 // TLS 1.3 handshake message types
@@ -54,6 +55,7 @@ const SIG_ECDSA_P256_SHA256: u16 = 0x0403;
 const SIG_RSA_PSS_RSAE_SHA256: u16 = 0x0804;
 const SIG_RSA_PSS_RSAE_SHA384: u16 = 0x0805;
 const SIG_RSA_PSS_RSAE_SHA512: u16 = 0x0806;
+const SIG_ED25519: u16 = 0x0807;
 
 // Named groups
 const GROUP_SECP256R1: u16 = 0x0017;
@@ -70,6 +72,11 @@ const CIPHER_SUITE_CHACHA20_POLY1305_SHA256: u16 = 0x1303;
 
 pub const EncryptionLevel = quic_crypto.EncryptionLevel;
 
+pub const PrivateKeyAlgorithm = enum {
+    ecdsa_p256_sha256,
+    ed25519,
+};
+
 // ─── CertificateVerify signature verification ────────────────────────
 
 fn verifyCertificateVerifySignature(
@@ -84,6 +91,14 @@ fn verifyCertificateVerifySignature(
             if (pub_key_algo != .X9_62_id_ecPublicKey) return error.BadCertificateVerify;
             const pub_key = EcdsaP256Sha256.PublicKey.fromSec1(pub_key_bytes) catch return error.BadCertificateVerify;
             const sig = EcdsaP256Sha256.Signature.fromDer(sig_bytes) catch return error.BadCertificateVerify;
+            sig.verify(signed_content, pub_key) catch return error.BadCertificateVerify;
+        },
+        SIG_ED25519 => {
+            if (pub_key_algo != .curveEd25519) return error.BadCertificateVerify;
+            if (pub_key_bytes.len != Ed25519.PublicKey.encoded_length) return error.BadCertificateVerify;
+            if (sig_bytes.len != Ed25519.Signature.encoded_length) return error.BadCertificateVerify;
+            const pub_key = Ed25519.PublicKey.fromBytes(pub_key_bytes[0..Ed25519.PublicKey.encoded_length].*) catch return error.BadCertificateVerify;
+            const sig = Ed25519.Signature.fromBytes(sig_bytes[0..Ed25519.Signature.encoded_length].*);
             sig.verify(signed_content, pub_key) catch return error.BadCertificateVerify;
         },
         SIG_RSA_PSS_RSAE_SHA256 => verifyRsaPss(pub_key_bytes, pub_key_algo, sig_bytes, signed_content, Sha256) catch return error.BadCertificateVerify,
@@ -505,7 +520,8 @@ pub const SessionTicket = struct {
 
 pub const TlsConfig = struct {
     cert_chain_der: []const []const u8, // DER-encoded certificates
-    private_key_bytes: []const u8, // Raw ECDSA P-256 private key (32 bytes)
+    private_key_bytes: []const u8, // Raw P-256 scalar or Ed25519 seed (32 bytes)
+    private_key_algorithm: PrivateKeyAlgorithm = .ecdsa_p256_sha256,
     alpn: []const []const u8,
     server_name: ?[]const u8 = null, // SNI (client only)
     skip_cert_verify: bool = true, // Skip X.509 chain + CertificateVerify validation
@@ -1597,6 +1613,7 @@ pub const Tls13Handshake = struct {
             &buf,
             transcript_hash,
             self.config.private_key_bytes,
+            self.config.private_key_algorithm,
             true, // is_server
         ) catch return error.InternalError;
 
@@ -2125,8 +2142,10 @@ fn buildClientHello(
     pos += 65;
 
     // signature_algorithms extension
-    pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.signature_algorithms), 2 + 8);
-    writeU16(buf[pos..], 8); // list length (4 algorithms x 2 bytes)
+    pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.signature_algorithms), 2 + 10);
+    writeU16(buf[pos..], 10); // list length (5 algorithms x 2 bytes)
+    pos += 2;
+    writeU16(buf[pos..], SIG_ED25519);
     pos += 2;
     writeU16(buf[pos..], SIG_ECDSA_P256_SHA256);
     pos += 2;
@@ -2453,6 +2472,7 @@ fn buildCertificateVerify(
     buf: []u8,
     transcript_hash: [32]u8,
     private_key_bytes: []const u8,
+    private_key_algorithm: PrivateKeyAlgorithm,
     is_server: bool,
 ) ![]const u8 {
     // Build the content to sign:
@@ -2464,29 +2484,41 @@ fn buildCertificateVerify(
     sign_content[64 + 33] = 0x00;
     @memcpy(sign_content[64 + 34 ..][0..32], &transcript_hash);
 
-    // Sign with ECDSA P-256
     if (private_key_bytes.len != 32) return error.InternalError;
 
-    const secret_key = EcdsaP256Sha256.SecretKey.fromBytes(private_key_bytes[0..32].*) catch return error.InternalError;
-    const key_pair = EcdsaP256Sha256.KeyPair.fromSecretKey(secret_key) catch return error.InternalError;
-
-    const sig = key_pair.sign(&sign_content, null) catch return error.InternalError;
-
-    var der_buf: [EcdsaP256Sha256.Signature.der_encoded_length_max]u8 = undefined;
-    const sig_bytes = sig.toDer(&der_buf);
+    var sig_storage: [EcdsaP256Sha256.Signature.der_encoded_length_max]u8 = undefined;
+    var sig_len: usize = 0;
+    const sig_algo: u16 = switch (private_key_algorithm) {
+        .ecdsa_p256_sha256 => sig_algo: {
+            const secret_key = EcdsaP256Sha256.SecretKey.fromBytes(private_key_bytes[0..32].*) catch return error.InternalError;
+            const key_pair = EcdsaP256Sha256.KeyPair.fromSecretKey(secret_key) catch return error.InternalError;
+            const sig = key_pair.sign(&sign_content, null) catch return error.InternalError;
+            const sig_bytes = sig.toDer(&sig_storage);
+            sig_len = sig_bytes.len;
+            break :sig_algo SIG_ECDSA_P256_SHA256;
+        },
+        .ed25519 => sig_algo: {
+            const key_pair = Ed25519.KeyPair.generateDeterministic(private_key_bytes[0..32].*) catch return error.InternalError;
+            const sig = key_pair.sign(&sign_content, null) catch return error.InternalError;
+            const sig_bytes = sig.toBytes();
+            @memcpy(sig_storage[0..sig_bytes.len], &sig_bytes);
+            sig_len = sig_bytes.len;
+            break :sig_algo SIG_ED25519;
+        },
+    };
 
     // Build message
     var pos: usize = 4; // reserve for header
 
     // signature_algorithm
-    writeU16(buf[pos..], SIG_ECDSA_P256_SHA256);
+    writeU16(buf[pos..], sig_algo);
     pos += 2;
 
     // signature length + signature
-    writeU16(buf[pos..], @intCast(sig_bytes.len));
+    writeU16(buf[pos..], @intCast(sig_len));
     pos += 2;
-    @memcpy(buf[pos..][0..sig_bytes.len], sig_bytes);
-    pos += sig_bytes.len;
+    @memcpy(buf[pos..][0..sig_len], sig_storage[0..sig_len]);
+    pos += sig_len;
 
     // Fill in message header
     const body_len: u24 = @intCast(pos - 4);
@@ -2681,6 +2713,53 @@ pub fn extractPkcs8EcPrivateKey(der: []const u8) ![]const u8 {
 
     // The contained value is an ECPrivateKey
     return extractEcPrivateKey(der[pos..][0..octet_len]);
+}
+
+fn readDerValue(der: []const u8, pos: *usize, expected_tag: u8) ![]const u8 {
+    if (pos.* >= der.len or der[pos.*] != expected_tag) return error.DecodeError;
+    pos.* += 1;
+    if (pos.* >= der.len) return error.DecodeError;
+
+    var len: usize = der[pos.*];
+    pos.* += 1;
+    if (len & 0x80 != 0) {
+        const num = len & 0x7f;
+        if (num == 0 or num > @sizeOf(usize) or pos.* + num > der.len) return error.DecodeError;
+        len = 0;
+        for (0..num) |i| {
+            len = (len << 8) | der[pos.* + i];
+        }
+        pos.* += num;
+    }
+
+    if (pos.* + len > der.len) return error.DecodeError;
+    const value = der[pos.*..][0..len];
+    pos.* += len;
+    return value;
+}
+
+// Extract the 32-byte Ed25519 seed from a PKCS#8 DER-encoded private key.
+// RFC 8410: AlgorithmIdentifier OID 1.3.101.112, PrivateKey OCTET STRING.
+pub fn extractEd25519PrivateKey(der: []const u8) ![]const u8 {
+    var outer_pos: usize = 0;
+    const outer = try readDerValue(der, &outer_pos, 0x30);
+
+    var pos: usize = 0;
+    _ = try readDerValue(outer, &pos, 0x02); // version
+
+    const algorithm = try readDerValue(outer, &pos, 0x30);
+    var algorithm_pos: usize = 0;
+    const oid = try readDerValue(algorithm, &algorithm_pos, 0x06);
+    if (!std.mem.eql(u8, oid, &.{ 0x2b, 0x65, 0x70 })) return error.DecodeError;
+    if (algorithm_pos != algorithm.len) return error.DecodeError;
+
+    const private_key = try readDerValue(outer, &pos, 0x04);
+    if (private_key.len == 32) return private_key;
+
+    var nested_pos: usize = 0;
+    const nested = try readDerValue(private_key, &nested_pos, 0x04);
+    if (nested_pos != private_key.len or nested.len != 32) return error.DecodeError;
+    return nested;
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────
