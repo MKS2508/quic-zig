@@ -34,7 +34,7 @@ pub const BaseFlowController = struct {
         return .{
             .receive_window = receive_window,
             .receive_window_size = receive_window,
-            .max_receive_window_size = max_receive_window,
+            .max_receive_window_size = @max(max_receive_window, receive_window),
         };
     }
 
@@ -65,13 +65,12 @@ pub const BaseFlowController = struct {
 
     // Check if we should send a BLOCKED frame and mark it as sent.
     // Returns the limit if a blocked frame should be sent, null otherwise.
-    // Only triggers once per limit to avoid duplicates.
+    // BLOCKED frames are not retransmission-tracked in this stack. Repeat while
+    // blocked so a lost control packet cannot permanently stall MAX_DATA credit.
     pub fn shouldSendBlocked(self: *BaseFlowController) ?u64 {
         if (self.bytes_sent >= self.send_window) {
-            if (self.blocked_at == null or self.blocked_at.? != self.send_window) {
-                self.blocked_at = self.send_window;
-                return self.send_window;
-            }
+            self.blocked_at = self.send_window;
+            return self.send_window;
         }
         return null;
     }
@@ -285,15 +284,15 @@ test "StreamFlowController: limited by connection" {
     try testing.expectEqual(@as(u64, 500), sfc.sendWindowSize());
 }
 
-test "BaseFlowController: shouldSendBlocked fires once per limit" {
+test "BaseFlowController: shouldSendBlocked repeats while blocked" {
     var fc = BaseFlowController.init(1000, MAX_RECEIVE_WINDOW);
     fc.send_window = 100;
     fc.addBytesSent(100);
 
     // First call should return the limit
     try testing.expectEqual(@as(?u64, 100), fc.shouldSendBlocked());
-    // Second call should return null (already sent for this limit)
-    try testing.expect(fc.shouldSendBlocked() == null);
+    // BLOCKED frames are not retransmission-tracked, so repeat while blocked.
+    try testing.expectEqual(@as(?u64, 100), fc.shouldSendBlocked());
 
     // After window update, should be able to send again
     fc.updateSendWindow(200);

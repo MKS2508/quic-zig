@@ -850,6 +850,82 @@ pub const PendingFrameQueue = struct {
     len: u8 = 0,
 
     pub fn push(self: *PendingFrameQueue, frame: PendingControlFrame) void {
+        var i: u8 = 0;
+        while (i < self.len) : (i += 1) {
+            switch (frame) {
+                .ping => switch (self.items[i]) {
+                    .ping => return,
+                    else => {},
+                },
+                .immediate_ack => switch (self.items[i]) {
+                    .immediate_ack => return,
+                    else => {},
+                },
+                .max_data => |new_max| switch (self.items[i]) {
+                    .max_data => |old_max| {
+                        self.items[i] = .{ .max_data = @max(old_max, new_max) };
+                        return;
+                    },
+                    else => {},
+                },
+                .max_stream_data => |new_msd| switch (self.items[i]) {
+                    .max_stream_data => |old_msd| if (old_msd.stream_id == new_msd.stream_id) {
+                        self.items[i] = .{ .max_stream_data = .{
+                            .stream_id = new_msd.stream_id,
+                            .max = @max(old_msd.max, new_msd.max),
+                        } };
+                        return;
+                    },
+                    else => {},
+                },
+                .max_streams_bidi => |new_max| switch (self.items[i]) {
+                    .max_streams_bidi => |old_max| {
+                        self.items[i] = .{ .max_streams_bidi = @max(old_max, new_max) };
+                        return;
+                    },
+                    else => {},
+                },
+                .max_streams_uni => |new_max| switch (self.items[i]) {
+                    .max_streams_uni => |old_max| {
+                        self.items[i] = .{ .max_streams_uni = @max(old_max, new_max) };
+                        return;
+                    },
+                    else => {},
+                },
+                .data_blocked => |new_limit| switch (self.items[i]) {
+                    .data_blocked => |old_limit| {
+                        self.items[i] = .{ .data_blocked = @max(old_limit, new_limit) };
+                        return;
+                    },
+                    else => {},
+                },
+                .stream_data_blocked => |new_sdb| switch (self.items[i]) {
+                    .stream_data_blocked => |old_sdb| if (old_sdb.stream_id == new_sdb.stream_id) {
+                        self.items[i] = .{ .stream_data_blocked = .{
+                            .stream_id = new_sdb.stream_id,
+                            .limit = @max(old_sdb.limit, new_sdb.limit),
+                        } };
+                        return;
+                    },
+                    else => {},
+                },
+                .streams_blocked_bidi => |new_limit| switch (self.items[i]) {
+                    .streams_blocked_bidi => |old_limit| {
+                        self.items[i] = .{ .streams_blocked_bidi = @max(old_limit, new_limit) };
+                        return;
+                    },
+                    else => {},
+                },
+                .streams_blocked_uni => |new_limit| switch (self.items[i]) {
+                    .streams_blocked_uni => |old_limit| {
+                        self.items[i] = .{ .streams_blocked_uni = @max(old_limit, new_limit) };
+                        return;
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+        }
         if (self.len < capacity) {
             self.items[self.len] = frame;
             self.len += 1;

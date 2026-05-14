@@ -1400,6 +1400,7 @@ pub const Connection = struct {
                 self.cc.app_limited = self.pkt_handler.bytes_in_flight < self.cc.sendWindow();
 
                 var ack_result: ack_handler.AckResult = .{};
+                defer ack_result.deinit(self.allocator);
                 try self.pkt_handler.onAckReceived(
                     enc_level,
                     ack.largest_ack,
@@ -1432,11 +1433,11 @@ pub const Connection = struct {
                     for (pkt.getStreamFrames()) |sf| {
                         if (stream_mod.isBidi(sf.stream_id)) {
                             if (self.streams.getStream(sf.stream_id)) |s| {
-                                s.send.onAck(sf.offset, sf.length);
+                                try s.send.onAck(sf.offset, sf.length);
                             }
                         } else {
                             if (self.streams.send_streams.get(sf.stream_id)) |s| {
-                                s.onAck(sf.offset, sf.length);
+                                try s.onAck(sf.offset, sf.length);
                             }
                         }
                     }
@@ -1514,7 +1515,7 @@ pub const Connection = struct {
                     ql.metricsUpdated(now, rs.min_rtt, rs.smoothed_rtt, rs.latest_rtt, rs.rtt_var, self.cc.sendWindow(), self.pkt_handler.bytes_in_flight);
                 }
 
-                self.maybeConfirmHandshake(enc_level, result.acked.len);
+                self.maybeConfirmHandshake(enc_level, result.acked.count());
 
                 // Update pacer
                 self.pacer.setBandwidth(self.cc.sendWindow(), &self.pkt_handler.rtt_stats);
@@ -1529,6 +1530,7 @@ pub const Connection = struct {
                 self.cc.app_limited = self.pkt_handler.bytes_in_flight < self.cc.sendWindow();
 
                 var ack_result: ack_handler.AckResult = .{};
+                defer ack_result.deinit(self.allocator);
                 try self.pkt_handler.onAckReceived(
                     enc_level,
                     ack.largest_ack,
@@ -1564,11 +1566,11 @@ pub const Connection = struct {
                     for (pkt.getStreamFrames()) |sf| {
                         if (stream_mod.isBidi(sf.stream_id)) {
                             if (self.streams.getStream(sf.stream_id)) |s| {
-                                s.send.onAck(sf.offset, sf.length);
+                                try s.send.onAck(sf.offset, sf.length);
                             }
                         } else {
                             if (self.streams.send_streams.get(sf.stream_id)) |s| {
-                                s.onAck(sf.offset, sf.length);
+                                try s.onAck(sf.offset, sf.length);
                             }
                         }
                     }
@@ -1667,7 +1669,7 @@ pub const Connection = struct {
                 self.peer_ecn_ect1[space_idx] = ack.ecn_ect1;
                 self.peer_ecn_ce[space_idx] = ack.ecn_ce;
 
-                self.maybeConfirmHandshake(enc_level, result.acked.len);
+                self.maybeConfirmHandshake(enc_level, result.acked.count());
 
                 // Update pacer
                 self.pacer.setBandwidth(self.cc.sendWindow(), &self.pkt_handler.rtt_stats);
@@ -1863,8 +1865,39 @@ pub const Connection = struct {
                 self.streams.setMaxStreams(self.streams.max_bidi_streams, max);
             },
 
-            .data_blocked => {},
-            .stream_data_blocked => {},
+            .data_blocked => |limit| {
+                // If the peer is blocked on connection credit, immediately
+                // re-advertise our current receive limit. MAX_DATA is
+                // idempotent, and blocked frames are the peer's explicit
+                // signal that a previous update might not have arrived.
+                self.queueFlowControlUpdates();
+                const current = self.conn_flow_ctrl.base.receive_window;
+                if (current > limit) {
+                    self.pending_frames.push(.{ .max_data = current });
+                }
+            },
+            .stream_data_blocked => |blocked| {
+                // Same logic for per-stream credit. For bidi streams, the
+                // receive side carries the limit we advertise to the peer.
+                self.queueFlowControlUpdates();
+                if (self.streams.getStream(blocked.stream_id)) |s| {
+                    const current = s.recv.receive_window;
+                    if (current > blocked.limit) {
+                        self.pending_frames.push(.{ .max_stream_data = .{
+                            .stream_id = blocked.stream_id,
+                            .max = current,
+                        } });
+                    }
+                } else if (self.streams.recv_streams.get(blocked.stream_id)) |s| {
+                    const current = s.receive_window;
+                    if (current > blocked.limit) {
+                        self.pending_frames.push(.{ .max_stream_data = .{
+                            .stream_id = blocked.stream_id,
+                            .max = current,
+                        } });
+                    }
+                }
+            },
             .streams_blocked_bidi => |val| {
                 // RFC 9000 §19.14: STREAMS_BLOCKED must not exceed 2^60
                 if (val > (1 << 60)) {
@@ -2950,13 +2983,20 @@ pub const Connection = struct {
                 if (self.pkt_num_spaces[1].crypto_seal != null) {
                     self.queueCryptoRetransmission(.handshake);
                 }
-                // Reset stream send_offset for unACKed data
+                // Queue unacked stream bytes as retransmission ranges. Do not
+                // rewind send_offset: already-sent bytes must not be recounted
+                // against connection flow control when MAX_DATA credit is zero.
                 var resend_it = self.streams.streams.valueIterator();
                 while (resend_it.next()) |s_ptr| {
                     const s = s_ptr.*;
                     if (s.send.hasUnackedData()) {
-                        s.send.send_offset = s.send.ack_offset;
-                        if (s.send.fin_queued) s.send.fin_sent = false;
+                        const start = s.send.ack_offset;
+                        const end = s.send.write_offset;
+                        if (end > start) {
+                            s.send.queueRetransmit(start, end - start, s.send.fin_queued);
+                        } else if (s.send.fin_queued) {
+                            s.send.queueRetransmit(end, 0, true);
+                        }
                     }
                 }
             }
@@ -3205,7 +3245,8 @@ pub const Connection = struct {
         // Loss timers don't increment pto_count — they run loss detection directly.
         if (self.pkt_handler.getExpiredLossTime(now)) |loss_level| {
             var loss_result: ack_handler.AckResult = .{};
-            self.pkt_handler.detectLossesForSpace(loss_level, now, &loss_result);
+            defer loss_result.deinit(self.allocator);
+            try self.pkt_handler.detectLossesForSpace(loss_level, now, &loss_result);
             var has_non_probe_loss_lt = false;
             var earliest_lost_sent_time_lt: ?i64 = null;
             for (loss_result.lost.constSlice()) |pkt| {
@@ -3322,29 +3363,22 @@ pub const Connection = struct {
                                     }
                                 }
                             }
-                            // Always scan in-flight packets for stream data to retransmit
-                            // (RFC 9002 §6.2.4: prefer data over PING). This is critical
-                            // under loss: after the packer consumes retransmission data,
-                            // hasData() returns false, but the retransmission packet might
-                            // still be in-flight (not yet ACKed/declared lost). Without this
-                            // unconditional scan, the PTO sends PINGs instead of data,
-                            // and the peer never receives the file.
-                            // If no stream data is pending AND the stream has unsent
-                            // data that was consumed by the packer but never ACKed,
-                            // reset send_offset to write_offset - data_size to force
-                            // retransmission. Only do this for small streams (multiconnect
-                            // serves 1KB files) to avoid resending entire large transfers.
-                            // If no pending data but there IS unACKed data,
-                            // reset send_offset to ack_offset to retransmit
-                            // only the unACKed portion.
-                            if (!has_data) {
+                            // PTO must rescue every stream with outstanding data, not only
+                            // the connection as a whole. In multi-stream transfers, one
+                            // stream can already have pending data while another has an
+                            // unacked hole and no queued retransmission. A connection-level
+                            // has_data guard would leave that second stream stalled.
+                            {
                                 var resend_it = self.streams.streams.valueIterator();
                                 while (resend_it.next()) |s_ptr| {
                                     const s = s_ptr.*;
                                     if (s.send.hasUnackedData()) {
-                                        s.send.send_offset = s.send.ack_offset;
-                                        if (s.send.fin_queued) {
-                                            s.send.fin_sent = false;
+                                        const start = s.send.ack_offset;
+                                        const end = s.send.write_offset;
+                                        if (end > start) {
+                                            s.send.queueRetransmit(start, end - start, s.send.fin_queued);
+                                        } else if (s.send.fin_queued) {
+                                            s.send.queueRetransmit(end, 0, true);
                                         }
                                         has_data = true;
                                     }
