@@ -459,10 +459,10 @@ pub const SendStream = struct {
     }
 
     // Check if we should send STREAM_DATA_BLOCKED. Returns the limit if yes.
-    // STREAM_DATA_BLOCKED is not retransmission-tracked in this stack. Repeat
-    // while blocked so lost control packets cannot deadlock stream credit.
+    // STREAM_DATA_BLOCKED is advisory; emit once per blocked limit and re-arm
+    // when MAX_STREAM_DATA advances the send window.
     pub fn shouldSendBlocked(self: *SendStream) ?u64 {
-        if (self.send_offset >= self.send_window and self.hasData()) {
+        if (self.send_offset >= self.send_window and self.hasData() and self.blocked_at != self.send_window) {
             self.blocked_at = self.send_window;
             return self.send_window;
         }
@@ -1798,6 +1798,22 @@ test "SendStream: retransmit queue overflow coalesces ranges" {
     try testing.expectEqual(@as(u64, 1750), ss.retransmit_ranges[0].length);
     try testing.expectEqual(@as(u64, 2048), ss.send_offset);
     try testing.expect(ss.hasRetransmitData());
+}
+
+test "SendStream: shouldSendBlocked emits once per blocked limit" {
+    var ss = SendStream.init(testing.allocator, 0);
+    defer ss.deinit();
+
+    ss.send_window = 4;
+    try ss.writeData("abcdefgh");
+    _ = ss.popStreamFrame(16).?;
+
+    try testing.expectEqual(@as(?u64, 4), ss.shouldSendBlocked());
+    try testing.expectEqual(@as(?u64, null), ss.shouldSendBlocked());
+
+    ss.updateSendWindow(6);
+    _ = ss.popStreamFrame(16).?;
+    try testing.expectEqual(@as(?u64, 6), ss.shouldSendBlocked());
 }
 
 // RFC 9218 priority scheduling tests
