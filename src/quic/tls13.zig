@@ -24,12 +24,6 @@ const EcdsaP256Sha256 = crypto.sign.ecdsa.EcdsaP256Sha256;
 const Ed25519 = crypto.sign.Ed25519;
 const Aes128Gcm = crypto.aead.aes_gcm.Aes128Gcm;
 
-fn unixNowSeconds() i64 {
-    var ts: std.posix.timespec = undefined;
-    if (std.c.clock_gettime(std.posix.CLOCK.REALTIME, &ts) != 0) return 0;
-    return @as(i64, ts.sec);
-}
-
 // TLS 1.3 handshake message types
 const MsgType = enum(u8) {
     client_hello = 1,
@@ -517,7 +511,7 @@ pub const SessionTicket = struct {
     }
 
     pub fn isExpired(self: *const SessionTicket) bool {
-        const now_sec = unixNowSeconds();
+        const now_sec = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
         return (now_sec - self.creation_time) > @as(i64, self.lifetime);
     }
 };
@@ -1151,7 +1145,7 @@ pub const Tls13Handshake = struct {
 
                 // Chain validation: verify each cert against its issuer
                 if (prev_parsed) |prev| {
-                    const now_sec = unixNowSeconds();
+                    const now_sec = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
                     prev.verify(parsed, now_sec) catch return error.BadCertificate;
 
                     // RFC 5280 §4.2.1.9: issuer cert must have basicConstraints CA:TRUE
@@ -1173,7 +1167,7 @@ pub const Tls13Handshake = struct {
                 // If this is the last cert, verify against CA bundle
                 if (pos >= cert_list_end) {
                     if (self.config.ca_bundle) |bundle| {
-                        const now_sec = unixNowSeconds();
+                        const now_sec = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
                         bundle.verify(parsed, now_sec) catch return error.BadCertificate;
                     }
                 }
@@ -1726,7 +1720,7 @@ pub const Tls13Handshake = struct {
         // Build ticket plaintext: psk(32) || creation_time(8) || alpn_len(1) || alpn
         var ticket_plain: [64]u8 = .{0} ** 64;
         @memcpy(ticket_plain[0..32], &psk);
-        const now_sec = unixNowSeconds();
+        const now_sec = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
         std.mem.writeInt(i64, ticket_plain[32..40], now_sec, .big);
         const alpn_bytes = if (self.config.alpn.len > 0) self.config.alpn[0] else "";
         const alpn_copy_len: u8 = @intCast(@min(alpn_bytes.len, 16));
@@ -1978,7 +1972,7 @@ pub const Tls13Handshake = struct {
         var ticket: SessionTicket = .{ .psk = psk };
         ticket.lifetime = lifetime;
         ticket.ticket_age_add = ticket_age_add;
-        ticket.creation_time = unixNowSeconds();
+        ticket.creation_time = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
         ticket.max_early_data_size = max_early_data;
 
         const copy_len: u16 = @intCast(@min(ticket_data.len, ticket.ticket.len));
@@ -2226,7 +2220,7 @@ fn buildClientHello(
         // pre_shared_key extension (type=41) - MUST be last
         const ticket_bytes = ticket.getTicket();
         const obfuscated_age: u32 = blk: {
-            const now_sec = unixNowSeconds();
+            const now_sec = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
             const age_ms: u32 = @intCast(@as(u64, @intCast(@max(0, now_sec - ticket.creation_time))) * 1000);
             break :blk age_ms +% ticket.ticket_age_add;
         };
@@ -3207,7 +3201,7 @@ test "NewSessionTicket: build and parse roundtrip" {
     var original = SessionTicket{ .psk = psk };
     original.lifetime = 86400;
     original.ticket_age_add = 0x12345678;
-    original.creation_time = unixNowSeconds();
+    original.creation_time = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
     original.max_early_data_size = 0xffffffff;
     @memcpy(original.ticket[0..64], &ticket_data);
     original.ticket_len = 64;
