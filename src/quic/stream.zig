@@ -137,14 +137,14 @@ pub const FrameSorter = struct {
                     const suffix = existing[suffix_start..];
                     const owned_suffix = try self.allocator.dupe(u8, suffix);
                     errdefer self.allocator.free(owned_suffix);
-                    _ = self.chunks.orderedRemove(existing_offset);
+                    _ = self.chunks.swapRemove(existing_offset);
                     self.allocator.free(existing);
                     try self.chunks.put(self.allocator, new_end, owned_suffix);
                     changed = true;
                     break;
                 }
 
-                _ = self.chunks.orderedRemove(existing_offset);
+                _ = self.chunks.swapRemove(existing_offset);
                 self.allocator.free(existing);
                 changed = true;
                 break;
@@ -165,6 +165,11 @@ pub const FrameSorter = struct {
     /// Pop the next contiguous chunk of data from the read position.
     /// Returns null if there's no data available at the current read position.
     pub fn pop(self: *FrameSorter) ?[]const u8 {
+        if (self.chunks.fetchSwapRemove(self.read_pos)) |entry| {
+            self.read_pos += entry.value.len;
+            return entry.value;
+        }
+
         var best_index: ?usize = null;
         var best_end: u64 = 0;
         for (self.chunks.keys(), 0..) |offset, index| {
@@ -178,7 +183,7 @@ pub const FrameSorter = struct {
         if (best_index) |index| {
             const offset = self.chunks.keys()[index];
             const data = self.chunks.values()[index];
-            _ = self.chunks.orderedRemove(offset);
+            _ = self.chunks.swapRemove(offset);
             const skip: usize = @intCast(self.read_pos - offset);
             const readable = data[skip..];
             const owned = if (skip == 0)
