@@ -448,6 +448,8 @@ pub const SendStream = struct {
                 break;
             }
         }
+        self.trimRetransmitRangesBelow(self.ack_offset);
+        self.send_offset = @max(self.send_offset, self.ack_offset);
     }
 
     /// Cancel the stream with an error code (sends RESET_STREAM).
@@ -690,6 +692,22 @@ pub const SendStream = struct {
             self.retransmit_ranges[i] = self.retransmit_ranges[i + 1];
         }
         self.retransmit_count -= 1;
+    }
+
+    fn trimRetransmitRangesBelow(self: *SendStream, acked_offset: u64) void {
+        var i: usize = 0;
+        while (i < self.retransmit_count) {
+            const end = self.retransmit_ranges[i].offset + self.retransmit_ranges[i].length;
+            if (end <= acked_offset) {
+                self.removeRetransmitRange(i);
+                continue;
+            }
+            if (self.retransmit_ranges[i].offset < acked_offset) {
+                self.retransmit_ranges[i].length = end - acked_offset;
+                self.retransmit_ranges[i].offset = acked_offset;
+            }
+            i += 1;
+        }
     }
 };
 
@@ -1803,6 +1821,47 @@ test "SendStream: retransmit queue overflow coalesces ranges" {
     try testing.expectEqual(@as(u64, 1750), ss.retransmit_ranges[0].length);
     try testing.expectEqual(@as(u64, 2048), ss.send_offset);
     try testing.expect(ss.hasRetransmitData());
+}
+
+test "SendStream: contiguous ACK advances send offset after retransmit" {
+    var ss = SendStream.init(testing.allocator, 0);
+    defer ss.deinit();
+
+    const data = "x" ** 100;
+    try ss.writeData(data);
+    ss.send_offset = 20;
+
+    ss.queueRetransmit(20, 80, false);
+    const retransmit = ss.popStreamFrame(100).?;
+    try testing.expectEqual(@as(u64, 20), retransmit.stream.offset);
+    try testing.expectEqual(@as(u64, 80), retransmit.stream.length);
+    try testing.expectEqual(@as(u64, 20), ss.send_offset);
+
+    try ss.onAck(0, 100);
+
+    try testing.expectEqual(@as(u64, 100), ss.ack_offset);
+    try testing.expectEqual(@as(u64, 100), ss.send_offset);
+    try testing.expect(!ss.hasData());
+    try testing.expect(ss.popStreamFrame(100) == null);
+}
+
+test "SendStream: ACK progress trims stale retransmit ranges" {
+    var ss = SendStream.init(testing.allocator, 0);
+    defer ss.deinit();
+
+    const data = "x" ** 100;
+    try ss.writeData(data);
+    ss.send_offset = 100;
+    ss.queueRetransmit(0, 80, false);
+
+    try ss.onAck(0, 32);
+
+    try testing.expectEqual(@as(u8, 1), ss.retransmit_count);
+    try testing.expectEqual(@as(u64, 32), ss.retransmit_ranges[0].offset);
+    try testing.expectEqual(@as(u64, 48), ss.retransmit_ranges[0].length);
+
+    try ss.onAck(32, 48);
+    try testing.expectEqual(@as(u8, 0), ss.retransmit_count);
 }
 
 test "SendStream: shouldSendBlocked emits once per blocked limit" {
