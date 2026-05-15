@@ -4,6 +4,7 @@ const testing = std.testing;
 
 const flow_control = @import("flow_control.zig");
 const Frame = @import("frame.zig").Frame;
+const ranges = @import("ranges.zig");
 
 /// Stream ID encoding per RFC 9000 Section 2.1:
 ///   Bit 0: initiator (0 = client, 1 = server)
@@ -104,17 +105,62 @@ pub const FrameSorter = struct {
             effective_offset = self.read_pos;
         }
 
-        // Check if there's already a chunk at this offset.
-        // Don't overwrite a longer chunk with a shorter one (retransmission
-        // with different fragmentation boundaries). Also free old data to
-        // prevent memory leaks.
-        if (self.chunks.get(effective_offset)) |existing| {
-            if (existing.len >= effective_data.len) {
-                // Existing chunk covers at least as much data — skip.
-                return;
+        // Fast path for the dominant receive case: new STREAM data appends at
+        // or beyond the highest byte ever buffered. It cannot overlap an
+        // existing chunk, so avoid scanning the full chunk map for every packet.
+        if (effective_offset >= self.highest_buffered) {
+            const owned = try self.allocator.dupe(u8, effective_data);
+            errdefer self.allocator.free(owned);
+            try self.chunks.put(self.allocator, effective_offset, owned);
+            self.highest_buffered = effective_offset + owned.len;
+            return;
+        }
+
+        while (true) {
+            const new_start = effective_offset;
+            const new_end = effective_offset + effective_data.len;
+            var changed = false;
+            var i: usize = 0;
+            while (i < self.chunks.count()) {
+                const existing_offset = self.chunks.keys()[i];
+                const existing = self.chunks.values()[i];
+                const existing_end = existing_offset + existing.len;
+                if (existing_end <= new_start or existing_offset >= new_end) {
+                    i += 1;
+                    continue;
+                }
+
+                if (existing_offset <= new_start and existing_end >= new_end) {
+                    return;
+                }
+
+                if (existing_offset <= new_start and existing_end > new_start) {
+                    const skip: usize = @intCast(existing_end - new_start);
+                    effective_offset = existing_end;
+                    effective_data = effective_data[skip..];
+                    if (effective_data.len == 0) return;
+                    changed = true;
+                    break;
+                }
+
+                if (existing_offset < new_end and existing_end > new_end) {
+                    const suffix_start: usize = @intCast(new_end - existing_offset);
+                    const suffix = existing[suffix_start..];
+                    const owned_suffix = try self.allocator.dupe(u8, suffix);
+                    errdefer self.allocator.free(owned_suffix);
+                    _ = self.chunks.swapRemove(existing_offset);
+                    self.allocator.free(existing);
+                    try self.chunks.put(self.allocator, new_end, owned_suffix);
+                    changed = true;
+                    break;
+                }
+
+                _ = self.chunks.swapRemove(existing_offset);
+                self.allocator.free(existing);
+                changed = true;
+                break;
             }
-            // New chunk is longer — free old, overwrite below.
-            self.allocator.free(existing);
+            if (!changed) break;
         }
 
         // Copy data to owned buffer
@@ -130,10 +176,39 @@ pub const FrameSorter = struct {
     /// Pop the next contiguous chunk of data from the read position.
     /// Returns null if there's no data available at the current read position.
     pub fn pop(self: *FrameSorter) ?[]const u8 {
-        if (self.chunks.get(self.read_pos)) |data| {
-            _ = self.chunks.orderedRemove(self.read_pos);
-            self.read_pos += data.len;
-            return data;
+        if (self.chunks.fetchSwapRemove(self.read_pos)) |entry| {
+            self.read_pos += entry.value.len;
+            return entry.value;
+        }
+
+        var best_index: ?usize = null;
+        var best_end: u64 = 0;
+        for (self.chunks.keys(), 0..) |offset, index| {
+            const data = self.chunks.values()[index];
+            const end = offset + data.len;
+            if (offset <= self.read_pos and self.read_pos < end and end > best_end) {
+                best_index = index;
+                best_end = end;
+            }
+        }
+        if (best_index) |index| {
+            const offset = self.chunks.keys()[index];
+            const data = self.chunks.values()[index];
+            _ = self.chunks.swapRemove(offset);
+            const skip: usize = @intCast(self.read_pos - offset);
+            const readable = data[skip..];
+            const owned = if (skip == 0)
+                data
+            else blk: {
+                const copy = self.allocator.dupe(u8, readable) catch {
+                    self.allocator.free(data);
+                    return null;
+                };
+                self.allocator.free(data);
+                break :blk copy;
+            };
+            self.read_pos += readable.len;
+            return owned;
         }
         return null;
     }
@@ -283,6 +358,11 @@ pub const SendStream = struct {
     /// ack_offset and write_offset may not have been received.
     ack_offset: u64 = 0,
 
+    /// STREAM frame ACKs can arrive out of order because packet ACK ranges are
+    /// not equivalent to contiguous stream-byte delivery. Track acknowledged
+    /// byte ranges and only advance ack_offset through a contiguous prefix.
+    acked_ranges: ranges.RangeSet,
+
     /// Maximum data the peer allows us to send on this stream.
     send_window: u64 = std.math.maxInt(u64),
 
@@ -293,7 +373,7 @@ pub const SendStream = struct {
     urgency: u3 = 3,
 
     /// RFC 9218 priority: incremental streams are interleaved round-robin.
-    incremental: bool = false,
+    incremental: bool = true,
 
     /// WebTransport sendOrder: higher values transmitted first. When set,
     /// takes precedence over RFC 9218 urgency for scheduling.
@@ -323,10 +403,12 @@ pub const SendStream = struct {
             .stream_id = stream_id,
             .allocator = allocator,
             .write_buffer = .{ .items = &.{}, .capacity = 0 },
+            .acked_ranges = ranges.RangeSet.init(allocator),
         };
     }
 
     pub fn deinit(self: *SendStream) void {
+        self.acked_ranges.deinit();
         self.write_buffer.deinit(self.allocator);
     }
 
@@ -353,11 +435,32 @@ pub const SendStream = struct {
     }
 
     /// Update the acknowledged offset when a packet carrying stream frames is ACKed.
-    pub fn onAck(self: *SendStream, offset: u64, length: u64) void {
-        const end = offset + length;
-        if (end > self.ack_offset) {
-            self.ack_offset = end;
+    pub fn onAck(self: *SendStream, offset: u64, length: u64) !void {
+        if (length == 0) {
+            return;
         }
+        const end = offset + length;
+        if (end <= self.ack_offset) {
+            return;
+        }
+
+        try self.acked_ranges.addRange(@max(offset, self.ack_offset), end - 1);
+        while (true) {
+            var advanced = false;
+            for (self.acked_ranges.getRanges()) |range| {
+                if (range.start <= self.ack_offset and self.ack_offset <= range.end) {
+                    self.ack_offset = range.end + 1;
+                    self.acked_ranges.removeBelow(self.ack_offset);
+                    advanced = true;
+                    break;
+                }
+            }
+            if (!advanced) {
+                break;
+            }
+        }
+        self.trimRetransmitRangesBelow(self.ack_offset);
+        self.send_offset = @max(self.send_offset, self.ack_offset);
     }
 
     /// Cancel the stream with an error code (sends RESET_STREAM).
@@ -374,13 +477,12 @@ pub const SendStream = struct {
     }
 
     // Check if we should send STREAM_DATA_BLOCKED. Returns the limit if yes.
-    // Only triggers once per limit to avoid duplicates.
+    // STREAM_DATA_BLOCKED is advisory; emit once per blocked limit and re-arm
+    // when MAX_STREAM_DATA advances the send window.
     pub fn shouldSendBlocked(self: *SendStream) ?u64 {
-        if (self.send_offset >= self.send_window and self.hasData()) {
-            if (self.blocked_at == null or self.blocked_at.? != self.send_window) {
-                self.blocked_at = self.send_window;
-                return self.send_window;
-            }
+        if (self.send_offset >= self.send_window and self.hasData() and self.blocked_at != self.send_window) {
+            self.blocked_at = self.send_window;
+            return self.send_window;
         }
         return null;
     }
@@ -424,18 +526,24 @@ pub const SendStream = struct {
             };
             self.retransmit_count += 1;
         } else {
-            // Queue overflow: fall back to resending from the earliest lost offset.
-            // Find minimum offset across all queued ranges and the new range,
-            // then reset send_offset so the packer resends everything from there.
-            // The receiver's FrameSorter deduplicates any already-received data.
+            // Queue overflow: coalesce to one broad retransmit range. Do not
+            // rewind send_offset: retransmitted bytes have already consumed
+            // connection-level flow-control credit and must stay on the
+            // retransmit path.
             var min_offset = offset;
+            var max_end = offset + length;
             var has_fin = fin;
             for (self.retransmit_ranges[0..self.retransmit_count]) |r| {
                 min_offset = @min(min_offset, r.offset);
+                max_end = @max(max_end, r.offset + r.length);
                 if (r.fin) has_fin = true;
             }
-            self.send_offset = @min(self.send_offset, min_offset);
-            self.retransmit_count = 0;
+            self.retransmit_ranges[0] = .{
+                .offset = min_offset,
+                .length = max_end - min_offset,
+                .fin = has_fin,
+            };
+            self.retransmit_count = 1;
             if (has_fin) {
                 self.fin_lost = true;
                 self.fin_sent = false;
@@ -449,6 +557,13 @@ pub const SendStream = struct {
             self.fin_lost or
             self.send_offset < self.write_offset or
             (self.fin_queued and !self.fin_sent);
+    }
+
+    /// Check if the next send is retransmission-only data. Retransmitted bytes
+    /// were already counted against connection flow control when first sent, so
+    /// packet assembly must not block them behind exhausted MAX_DATA credit.
+    pub fn hasRetransmitData(self: *const SendStream) bool {
+        return self.retransmit_count > 0 or self.fin_lost;
     }
 
     /// Check if there's data that has been sent but not yet acknowledged.
@@ -588,6 +703,22 @@ pub const SendStream = struct {
             self.retransmit_ranges[i] = self.retransmit_ranges[i + 1];
         }
         self.retransmit_count -= 1;
+    }
+
+    fn trimRetransmitRangesBelow(self: *SendStream, acked_offset: u64) void {
+        var i: usize = 0;
+        while (i < self.retransmit_count) {
+            const end = self.retransmit_ranges[i].offset + self.retransmit_ranges[i].length;
+            if (end <= acked_offset) {
+                self.removeRetransmitRange(i);
+                continue;
+            }
+            if (self.retransmit_ranges[i].offset < acked_offset) {
+                self.retransmit_ranges[i].length = end - acked_offset;
+                self.retransmit_ranges[i].offset = acked_offset;
+            }
+            i += 1;
+        }
     }
 };
 
@@ -1164,6 +1295,58 @@ test "FrameSorter: out-of-order data" {
     testing.allocator.free(chunk2.?);
 }
 
+test "FrameSorter: sequential append fast path remains readable" {
+    var sorter = FrameSorter.init(testing.allocator);
+    defer sorter.deinit();
+
+    try sorter.push(0, "hello", false);
+    try sorter.push(5, " ", false);
+    try sorter.push(6, "world", true);
+
+    const chunk1 = sorter.pop();
+    try testing.expect(chunk1 != null);
+    try testing.expectEqualStrings("hello", chunk1.?);
+    testing.allocator.free(chunk1.?);
+
+    const chunk2 = sorter.pop();
+    try testing.expect(chunk2 != null);
+    try testing.expectEqualStrings(" ", chunk2.?);
+    testing.allocator.free(chunk2.?);
+
+    const chunk3 = sorter.pop();
+    try testing.expect(chunk3 != null);
+    try testing.expectEqualStrings("world", chunk3.?);
+    testing.allocator.free(chunk3.?);
+
+    try testing.expect(sorter.isComplete());
+}
+
+test "FrameSorter: out-of-order gap still accepts sequential tail" {
+    var sorter = FrameSorter.init(testing.allocator);
+    defer sorter.deinit();
+
+    try sorter.push(6, "world", true);
+    try sorter.push(0, "hello", false);
+    try sorter.push(5, " ", false);
+
+    const chunk1 = sorter.pop();
+    try testing.expect(chunk1 != null);
+    try testing.expectEqualStrings("hello", chunk1.?);
+    testing.allocator.free(chunk1.?);
+
+    const chunk2 = sorter.pop();
+    try testing.expect(chunk2 != null);
+    try testing.expectEqualStrings(" ", chunk2.?);
+    testing.allocator.free(chunk2.?);
+
+    const chunk3 = sorter.pop();
+    try testing.expect(chunk3 != null);
+    try testing.expectEqualStrings("world", chunk3.?);
+    testing.allocator.free(chunk3.?);
+
+    try testing.expect(sorter.isComplete());
+}
+
 // RFC 9000 §4.5: final size validation
 test "FrameSorter: conflicting final size from FIN" {
     var sorter = FrameSorter.init(testing.allocator);
@@ -1670,8 +1853,8 @@ test "SendStream: partial retransmit due to max_len" {
 }
 
 // Retransmit queue overflow: when MAX_RETRANSMIT_RANGES is exceeded,
-// send_offset is lowered to cover all lost data (no silent data loss).
-test "SendStream: retransmit queue overflow falls back to send_offset" {
+// lost data is coalesced without rewinding send_offset.
+test "SendStream: retransmit queue overflow coalesces ranges" {
     var ss = SendStream.init(testing.allocator, 0);
     defer ss.deinit();
 
@@ -1694,10 +1877,70 @@ test "SendStream: retransmit queue overflow falls back to send_offset" {
     // Queue one more — should trigger overflow fallback
     ss.queueRetransmit(1700, 50, false);
 
-    // After overflow: retransmit queue is cleared, send_offset lowered to earliest
+    // After overflow: retransmit queue is coalesced, while send_offset stays at
+    // the real high-water mark so flow-control credit is not double-counted.
+    try testing.expectEqual(@as(u8, 1), ss.retransmit_count);
+    try testing.expectEqual(@as(u64, 0), ss.retransmit_ranges[0].offset);
+    try testing.expectEqual(@as(u64, 1750), ss.retransmit_ranges[0].length);
+    try testing.expectEqual(@as(u64, 2048), ss.send_offset);
+    try testing.expect(ss.hasRetransmitData());
+}
+
+test "SendStream: contiguous ACK advances send offset after retransmit" {
+    var ss = SendStream.init(testing.allocator, 0);
+    defer ss.deinit();
+
+    const data = "x" ** 100;
+    try ss.writeData(data);
+    ss.send_offset = 20;
+
+    ss.queueRetransmit(20, 80, false);
+    const retransmit = ss.popStreamFrame(100).?;
+    try testing.expectEqual(@as(u64, 20), retransmit.stream.offset);
+    try testing.expectEqual(@as(u64, 80), retransmit.stream.length);
+    try testing.expectEqual(@as(u64, 20), ss.send_offset);
+
+    try ss.onAck(0, 100);
+
+    try testing.expectEqual(@as(u64, 100), ss.ack_offset);
+    try testing.expectEqual(@as(u64, 100), ss.send_offset);
+    try testing.expect(!ss.hasData());
+    try testing.expect(ss.popStreamFrame(100) == null);
+}
+
+test "SendStream: ACK progress trims stale retransmit ranges" {
+    var ss = SendStream.init(testing.allocator, 0);
+    defer ss.deinit();
+
+    const data = "x" ** 100;
+    try ss.writeData(data);
+    ss.send_offset = 100;
+    ss.queueRetransmit(0, 80, false);
+
+    try ss.onAck(0, 32);
+
+    try testing.expectEqual(@as(u8, 1), ss.retransmit_count);
+    try testing.expectEqual(@as(u64, 32), ss.retransmit_ranges[0].offset);
+    try testing.expectEqual(@as(u64, 48), ss.retransmit_ranges[0].length);
+
+    try ss.onAck(32, 48);
     try testing.expectEqual(@as(u8, 0), ss.retransmit_count);
-    try testing.expectEqual(@as(u64, 0), ss.send_offset); // min of all range offsets
-    try testing.expect(ss.hasData()); // still has data to send
+}
+
+test "SendStream: shouldSendBlocked emits once per blocked limit" {
+    var ss = SendStream.init(testing.allocator, 0);
+    defer ss.deinit();
+
+    ss.send_window = 4;
+    try ss.writeData("abcdefgh");
+    _ = ss.popStreamFrame(16).?;
+
+    try testing.expectEqual(@as(?u64, 4), ss.shouldSendBlocked());
+    try testing.expectEqual(@as(?u64, null), ss.shouldSendBlocked());
+
+    ss.updateSendWindow(6);
+    _ = ss.popStreamFrame(16).?;
+    try testing.expectEqual(@as(?u64, 6), ss.shouldSendBlocked());
 }
 
 // RFC 9218 priority scheduling tests

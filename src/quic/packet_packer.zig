@@ -332,11 +332,13 @@ pub const PacketPacker = struct {
         // 0-RTT packets only contain STREAM and DATAGRAM frames — skip ACK, CRYPTO, control
         if (!zero_rtt) {
             // 1. ACK frame (always first if pending)
-            // Force ACK generation whenever there are unacknowledged ack-eliciting packets.
-            // In ack_only mode (congestion-limited), prompt ACKs are critical for the peer's
-            // CC to grow its window. Delaying ACKs starves the peer of feedback.
+            // Force ACK generation only when it can piggyback on non-ACK data.
+            // ACK-only packets bypass congestion control; forcing one on every
+            // congestion-limited poll can create an ACK-only send loop that
+            // never drains bytes_in_flight or returns quiescent state to the
+            // application. In ack_only mode, honor the normal ACK queue/alarm.
             const ack_delay_exp: u64 = 3;
-            const ack_frame_opt: ?Frame = if (pkt_handler.hasUnackedAckEliciting(level))
+            const ack_frame_opt: ?Frame = if (!ack_only and pkt_handler.hasUnackedAckEliciting(level))
                 pkt_handler.getAckFrameForced(level, now, ack_delay_exp)
             else
                 pkt_handler.getAckFrame(level, now, ack_delay_exp);
@@ -411,16 +413,19 @@ pub const PacketPacker = struct {
 
             // 4. Pending control frames (only in 1-RTT)
             // PATH_CHALLENGE/PATH_RESPONSE are always sent (path probing is exempt from CC).
-            // Other control frames are skipped when ack_only (congestion-limited).
+            // Receiver-credit frames must also be allowed through the congestion-limited
+            // path: otherwise a small control packet can fill cwnd and prevent MAX_DATA
+            // from unblocking a peer that is already stuck at the connection window.
             if (level == .application) {
                 var remaining = pending_frames.len;
                 while (remaining > 0) : (remaining -= 1) {
                     const pcf = pending_frames.pop() orelse break;
-                    const is_path_probing = switch (pcf) {
+                    const is_urgent_control = switch (pcf) {
                         .path_challenge, .path_response => true,
+                        .max_data, .max_stream_data, .max_streams_bidi, .max_streams_uni => true,
                         else => false,
                     };
-                    if (is_path_probing or !ack_only) {
+                    if (is_urgent_control or !ack_only) {
                         try pcf.write(writer);
                         ack_eliciting = true;
                     } else {
@@ -445,12 +450,16 @@ pub const PacketPacker = struct {
             const sched_count = streams.getScheduledStreams(&sched_buf);
             for (sched_buf[0..sched_count]) |s| {
                 if (fbs.seek + AEAD_TAG_LEN + 16 >= effective_max) break;
-                if (conn_budget == 0) break;
+                const retransmitting = s.send.hasRetransmitData();
+                if (conn_budget == 0 and !retransmitting) continue;
                 if (stream_frame_info_count >= ack_handler.MAX_STREAM_FRAMES_PER_PACKET) break;
                 const remaining = effective_max - fbs.seek - AEAD_TAG_LEN;
                 const header_overhead = streamFrameHeaderOverhead(s.send.stream_id, s.send.send_offset, remaining);
                 if (remaining <= header_overhead) break;
-                const max_stream_data = @min(remaining - header_overhead, conn_budget);
+                const max_stream_data = if (retransmitting)
+                    remaining - header_overhead
+                else
+                    @min(remaining - header_overhead, conn_budget);
                 const prev_send_offset = s.send.send_offset;
                 if (s.send.popStreamFrame(max_stream_data)) |stream_frame| {
                     try stream_frame.write(writer);
@@ -478,12 +487,16 @@ pub const PacketPacker = struct {
             if (uni_sched_count > 0) {
             for (uni_sched_buf[0..uni_sched_count]) |s| {
                 if (fbs.seek + AEAD_TAG_LEN + 16 >= effective_max) break;
-                if (conn_budget == 0) break;
+                const retransmitting = s.hasRetransmitData();
+                if (conn_budget == 0 and !retransmitting) continue;
                 if (stream_frame_info_count >= ack_handler.MAX_STREAM_FRAMES_PER_PACKET) break;
                 const remaining_uni = effective_max - fbs.seek - AEAD_TAG_LEN;
                 const uni_header_overhead = streamFrameHeaderOverhead(s.stream_id, s.send_offset, remaining_uni);
                 if (remaining_uni <= uni_header_overhead) break;
-                const max_stream_data = @min(remaining_uni - uni_header_overhead, conn_budget);
+                const max_stream_data = if (retransmitting)
+                    remaining_uni - uni_header_overhead
+                else
+                    @min(remaining_uni - uni_header_overhead, conn_budget);
                 const prev_uni_offset = s.send_offset;
                 if (s.popStreamFrame(max_stream_data)) |stream_frame| {
                     try stream_frame.write(writer);
@@ -889,7 +902,7 @@ test "PacketPacker: no data produces no packet" {
     try testing.expectEqual(@as(usize, 0), written);
 }
 
-test "PacketPacker: ack_only skips stream data" {
+test "PacketPacker: ack_only skips stream data but sends receiver credit" {
     const scid = &[_]u8{0x01};
     const dcid = &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     var packer = PacketPacker.init(testing.allocator, false, scid, dcid, 0x00000001);
@@ -904,6 +917,7 @@ test "PacketPacker: ack_only skips stream data" {
     defer streams.deinit();
 
     var pending_frames = frame_mod.PendingFrameQueue{};
+    pending_frames.push(.{ .max_data = 12345 });
 
     // Create a stream with data
     streams.setMaxStreams(10, 10);
@@ -933,11 +947,54 @@ test "PacketPacker: ack_only skips stream data" {
         true, // ack_only = true
     );
 
-    // Should produce an ACK-only packet
+    // Should produce a packet carrying ACK plus receiver-credit control.
     try testing.expect(written > 0);
+    try testing.expectEqual(@as(u8, 0), pending_frames.len);
 
     // Stream data should still be waiting (not consumed)
     try testing.expect(s.send.hasData());
+}
+
+test "PacketPacker: ack_only does not force sub-threshold ACKs" {
+    const scid = &[_]u8{0x01};
+    const dcid = &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    var packer = PacketPacker.init(testing.allocator, false, scid, dcid, 0x00000001);
+
+    var pkt_handler = ack_handler.PacketHandler.init(testing.allocator);
+    defer pkt_handler.deinit();
+
+    var crypto_mgr = crypto_stream.CryptoStreamManager.init(testing.allocator);
+    defer crypto_mgr.deinit();
+
+    var streams = stream_mod.StreamsMap.init(testing.allocator, false);
+    defer streams.deinit();
+
+    var pending_frames = frame_mod.PendingFrameQueue{};
+
+    // One ack-eliciting packet arms a delayed ACK, but it is below the immediate
+    // ACK threshold. ACK-only packing must not force an immediate packet.
+    try pkt_handler.recv[2].onPacketReceived(0, true, 1000, 0);
+
+    const keys = try testClientKeys();
+
+    var out_buf: [1500]u8 = undefined;
+    const written = try packer.packCoalesced(
+        &out_buf,
+        &pkt_handler,
+        &crypto_mgr,
+        &streams,
+        &pending_frames,
+        null,
+        null,
+        null,
+        keys.seal,
+        1000,
+        null,
+        true,
+    );
+
+    try testing.expectEqual(@as(usize, 0), written);
+    try testing.expectEqual(@as(u64, 0), pkt_handler.next_pn[2]);
 }
 
 test "PacketPacker: coalesced Initial + Handshake" {
