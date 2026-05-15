@@ -105,6 +105,17 @@ pub const FrameSorter = struct {
             effective_offset = self.read_pos;
         }
 
+        // Fast path for the dominant receive case: new STREAM data appends at
+        // or beyond the highest byte ever buffered. It cannot overlap an
+        // existing chunk, so avoid scanning the full chunk map for every packet.
+        if (effective_offset >= self.highest_buffered) {
+            const owned = try self.allocator.dupe(u8, effective_data);
+            errdefer self.allocator.free(owned);
+            try self.chunks.put(self.allocator, effective_offset, owned);
+            self.highest_buffered = effective_offset + owned.len;
+            return;
+        }
+
         while (true) {
             const new_start = effective_offset;
             const new_end = effective_offset + effective_data.len;
@@ -1282,6 +1293,58 @@ test "FrameSorter: out-of-order data" {
     try testing.expect(chunk2 != null);
     try testing.expectEqualStrings(" world", chunk2.?);
     testing.allocator.free(chunk2.?);
+}
+
+test "FrameSorter: sequential append fast path remains readable" {
+    var sorter = FrameSorter.init(testing.allocator);
+    defer sorter.deinit();
+
+    try sorter.push(0, "hello", false);
+    try sorter.push(5, " ", false);
+    try sorter.push(6, "world", true);
+
+    const chunk1 = sorter.pop();
+    try testing.expect(chunk1 != null);
+    try testing.expectEqualStrings("hello", chunk1.?);
+    testing.allocator.free(chunk1.?);
+
+    const chunk2 = sorter.pop();
+    try testing.expect(chunk2 != null);
+    try testing.expectEqualStrings(" ", chunk2.?);
+    testing.allocator.free(chunk2.?);
+
+    const chunk3 = sorter.pop();
+    try testing.expect(chunk3 != null);
+    try testing.expectEqualStrings("world", chunk3.?);
+    testing.allocator.free(chunk3.?);
+
+    try testing.expect(sorter.isComplete());
+}
+
+test "FrameSorter: out-of-order gap still accepts sequential tail" {
+    var sorter = FrameSorter.init(testing.allocator);
+    defer sorter.deinit();
+
+    try sorter.push(6, "world", true);
+    try sorter.push(0, "hello", false);
+    try sorter.push(5, " ", false);
+
+    const chunk1 = sorter.pop();
+    try testing.expect(chunk1 != null);
+    try testing.expectEqualStrings("hello", chunk1.?);
+    testing.allocator.free(chunk1.?);
+
+    const chunk2 = sorter.pop();
+    try testing.expect(chunk2 != null);
+    try testing.expectEqualStrings(" ", chunk2.?);
+    testing.allocator.free(chunk2.?);
+
+    const chunk3 = sorter.pop();
+    try testing.expect(chunk3 != null);
+    try testing.expectEqualStrings("world", chunk3.?);
+    testing.allocator.free(chunk3.?);
+
+    try testing.expect(sorter.isComplete());
 }
 
 // RFC 9000 §4.5: final size validation
