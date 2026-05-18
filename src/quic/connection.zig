@@ -529,10 +529,41 @@ pub const ConnectionConfig = struct {
 
 /// A QUIC connection.
 ///
-// RFC 9001 §4.1.4: bounds for buffering 0-RTT packets received before the
-// early-data read key is installed (see Connection.early_0rtt_*).
-const EARLY_0RTT_BUF_LEN = 24 * 1024;
-const EARLY_0RTT_MAX_PKTS = 32;
+// General queue for packets that can't be decrypted yet because the keys
+// for their encryption level aren't installed (0-RTT before the early-data
+// key, Handshake/1-RTT before those keys — e.g. a multi-Initial ClientHello
+// or reordering). Mirrors quic-go's single `undecryptablePackets` queue
+// (RFC 9001 §4.1.4); replayed when any read key is installed. Bounded for
+// anti-amplification — cap matches quic-go's protocol.MaxUndecryptablePackets.
+const UNDECRYPTABLE_MAX_PKTS = 32;
+const UNDECRYPTABLE_BUF_LEN = 32 * 1024;
+
+const UndecryptablePackets = struct {
+    buf: [UNDECRYPTABLE_BUF_LEN]u8 = undefined,
+    off: [UNDECRYPTABLE_MAX_PKTS]u32 = undefined,
+    plen: [UNDECRYPTABLE_MAX_PKTS]u16 = undefined,
+    info: RecvInfo = undefined,
+    used: u32 = 0,
+    count: u8 = 0,
+
+    fn reset(self: *UndecryptablePackets) void {
+        self.used = 0;
+        self.count = 0;
+    }
+
+    /// Store a raw packet to replay later. Bounded; excess silently dropped
+    /// (RFC 9001 §4.1.4 allows dropping when the buffer is full).
+    fn push(self: *UndecryptablePackets, bytes: []const u8, rinfo: RecvInfo) void {
+        if (self.count >= UNDECRYPTABLE_MAX_PKTS) return;
+        if (self.used + bytes.len > UNDECRYPTABLE_BUF_LEN) return;
+        @memcpy(self.buf[self.used..][0..bytes.len], bytes);
+        self.off[self.count] = self.used;
+        self.plen[self.count] = @intCast(bytes.len);
+        if (self.count == 0) self.info = rinfo;
+        self.used += @intCast(bytes.len);
+        self.count += 1;
+    }
+};
 
 /// This is the central state machine that manages the QUIC protocol.
 /// Following quic-go's architecture, the connection runs an event-driven
@@ -645,18 +676,12 @@ pub const Connection = struct {
     early_data_open: ?quic_crypto.Open = null, // Server: decrypt 0-RTT packets
     early_data_seal: ?quic_crypto.Seal = null, // Client: encrypt 0-RTT packets
 
-    // RFC 9001 §4.1.4: a server may receive 0-RTT packets before the
-    // early-data read key is installed (the ClientHello can span several
-    // Initials, so the key is not ready when a fast peer bursts its 0-RTT).
-    // Buffer those packets here and replay them once the key is installed,
-    // instead of dropping them. Bounded to avoid memory amplification.
-    early_0rtt_buf: [EARLY_0RTT_BUF_LEN]u8 = undefined,
-    early_0rtt_off: [EARLY_0RTT_MAX_PKTS]u32 = undefined,
-    early_0rtt_plen: [EARLY_0RTT_MAX_PKTS]u16 = undefined,
-    early_0rtt_info: RecvInfo = undefined,
-    early_0rtt_used: u32 = 0,
-    early_0rtt_count: u8 = 0,
-    pending_replay_0rtt: bool = false,
+    // Packets received before the keys for their encryption level were
+    // available. Buffered (not dropped) and replayed once a read key is
+    // installed. See UndecryptablePackets above.
+    undecryptable: UndecryptablePackets = .{},
+    pending_replay_undecryptable: bool = false,
+    replaying_undecryptable: bool = false,
 
     // Session ticket received from server (readable by application)
     session_ticket: ?tls13.SessionTicket = null,
@@ -1082,46 +1107,57 @@ pub const Connection = struct {
         if (self.state == .first_flight) self.state = .handshake;
     }
 
-    /// RFC 9001 §4.1.4: store a 0-RTT packet received before the early-data
-    /// key is available, to be replayed later. Bounded; excess is dropped.
-    fn bufferEarly0Rtt(self: *Connection, header: *packet.Header, fbs: anytype, info: RecvInfo) void {
+    /// The raw bytes of the packet currently being parsed, from its start to
+    /// the end of its payload (excludes any coalesced packets that follow).
+    /// Valid before decrypt() advances the stream.
+    fn currentPacketBytes(header: *packet.Header, fbs: anytype) ?[]const u8 {
         const pkt_len = (fbs.seek - header.packet_start) + header.remainder_len;
-        if (self.early_0rtt_count >= EARLY_0RTT_MAX_PKTS) return;
-        if (header.packet_start + pkt_len > fbs.buffer.len) return;
-        if (self.early_0rtt_used + pkt_len > EARLY_0RTT_BUF_LEN) return;
-        @memcpy(
-            self.early_0rtt_buf[self.early_0rtt_used..][0..pkt_len],
-            fbs.buffer[header.packet_start..][0..pkt_len],
-        );
-        self.early_0rtt_off[self.early_0rtt_count] = self.early_0rtt_used;
-        self.early_0rtt_plen[self.early_0rtt_count] = @intCast(pkt_len);
-        if (self.early_0rtt_count == 0) self.early_0rtt_info = info;
-        self.early_0rtt_used += @intCast(pkt_len);
-        self.early_0rtt_count += 1;
-        std.log.info("recv: buffered 0-RTT packet ({d} bytes; {d} buffered)", .{ pkt_len, self.early_0rtt_count });
+        if (header.packet_start + pkt_len > fbs.buffer.len) return null;
+        return fbs.buffer[header.packet_start..][0..pkt_len];
     }
 
-    /// Replay 0-RTT packets buffered before the early-data key was installed.
-    /// Called from recv() after advanceHandshake() returns (never re-entrantly
-    /// from inside the handshake action loop).
-    fn replayBufferedZeroRtt(self: *Connection) void {
-        const n = self.early_0rtt_count;
+    /// Buffer a packet whose encryption-level keys aren't installed yet,
+    /// instead of dropping it (RFC 9001 §4.1.4). No-op while replaying so a
+    /// still-undecryptable packet is dropped rather than re-queued.
+    fn bufferUndecryptable(self: *Connection, header: *packet.Header, fbs: anytype, info: RecvInfo, what: []const u8) void {
+        if (self.replaying_undecryptable) return;
+        const bytes = currentPacketBytes(header, fbs) orelse return;
+        self.undecryptable.push(bytes, info);
+        std.log.info("recv: buffered undecryptable {s} packet ({d} bytes; {d} queued)", .{ what, bytes.len, self.undecryptable.count });
+    }
+
+    /// Replay packets that were buffered because their keys weren't installed
+    /// yet (RFC 9001 §4.1.4; mirrors quic-go's undecryptablePacketsToProcess).
+    /// Called from recv() after advanceHandshake() returns, never re-entrantly
+    /// from inside the handshake action loop. The `replaying_undecryptable`
+    /// guard makes recv() drop (not re-queue) anything still undecryptable.
+    fn replayUndecryptable(self: *Connection) void {
+        const n = self.undecryptable.count;
         if (n == 0) return;
-        std.log.info("replaying {d} buffered 0-RTT packet(s)", .{n});
-        self.early_0rtt_count = 0;
-        self.early_0rtt_used = 0;
+        std.log.info("replaying {d} buffered undecryptable packet(s)", .{n});
         // Don't re-credit received bytes on replay (anti-amplification:
         // keeps the server conservative — RFC 9000 §8.1).
-        var rinfo = self.early_0rtt_info;
+        var rinfo = self.undecryptable.info;
         rinfo.datagram_size = 0;
+        self.replaying_undecryptable = true;
+        defer self.replaying_undecryptable = false;
         for (0..n) |i| {
-            const off = self.early_0rtt_off[i];
-            const len = self.early_0rtt_plen[i];
-            var rfbs = io.fixedBufferStream(self.early_0rtt_buf[off..][0..len]);
+            const off = self.undecryptable.off[i];
+            const len = self.undecryptable.plen[i];
+            var rfbs = io.fixedBufferStream(self.undecryptable.buf[off..][0..len]);
             var h = packet.Header.parse(&rfbs, 0) catch continue;
-            self.processZeroRttPacket(&h, &rfbs, rinfo) catch continue;
+            self.recv(&h, &rfbs, rinfo) catch continue;
         }
-        self.advanceHandshake() catch {};
+        self.undecryptable.reset();
+    }
+
+    /// Replay buffered packets if a read key was just installed. Safe to call
+    /// after any advanceHandshake(); the guard prevents nested replay.
+    fn drainUndecryptableIfPending(self: *Connection) void {
+        if (self.pending_replay_undecryptable and !self.replaying_undecryptable) {
+            self.pending_replay_undecryptable = false;
+            self.replayUndecryptable();
+        }
     }
 
     /// Process a received packet.
@@ -1170,14 +1206,14 @@ pub const Connection = struct {
         // 0-RTT packets use the application PN space but with early data keys
         if (epoch == packet.Epoch.zero_rtt) {
             if (self.early_data_open == null) {
-                // RFC 9001 §4.1.4: buffer rather than drop — the key is not
-                // yet installed (multi-Initial ClientHello). Replayed once
-                // the early-data key is installed.
-                self.bufferEarly0Rtt(header, fbs, info);
+                // Key not installed yet (e.g. multi-Initial ClientHello).
+                // Buffer rather than drop; replayed on early-data key install.
+                self.bufferUndecryptable(header, fbs, info, "0-RTT");
                 return;
             }
             try self.processZeroRttPacket(header, fbs, info);
             try self.advanceHandshake();
+            self.drainUndecryptableIfPending();
             return;
         }
 
@@ -1188,7 +1224,10 @@ pub const Connection = struct {
         std.log.debug("recv: using space {d} ({s}), has_keys={}", .{ space_idx, @tagName(enc_level), has_keys });
 
         if (!has_keys) {
-            std.log.info("recv: dropping packet for {s} (keys not available)", .{@tagName(enc_level)});
+            // Keys for this level aren't installed yet (early Handshake/1-RTT,
+            // e.g. reordering). Buffer rather than drop; replayed on key
+            // install (RFC 9001 §4.1.4; quic-go undecryptablePackets).
+            self.bufferUndecryptable(header, fbs, info, @tagName(enc_level));
             return;
         }
 
@@ -1413,15 +1452,10 @@ pub const Connection = struct {
         // After processing crypto frames, try advancing the handshake
         try self.advanceHandshake();
 
-        // RFC 9001 §4.1.4: if the handshake just installed the early-data
-        // key (e.g. the ClientHello completed across multiple Initials),
-        // replay any 0-RTT packets that arrived before it was available.
-        // Done here, after advanceHandshake() returns, to avoid re-entering
-        // the handshake action loop where the key is installed.
-        if (self.pending_replay_0rtt) {
-            self.pending_replay_0rtt = false;
-            self.replayBufferedZeroRtt();
-        }
+        // If advanceHandshake() just installed a read key, replay any packets
+        // buffered before that key was available. Done here, after it returns,
+        // to avoid re-entering the handshake action loop where keys install.
+        self.drainUndecryptableIfPending();
     }
 
     /// Queue CRYPTO frame retransmission by resetting the crypto stream's send offset.
@@ -2413,7 +2447,7 @@ pub const Connection = struct {
                         .early_data => {
                             if (self.is_server) {
                                 self.early_data_open = ik.open;
-                                self.pending_replay_0rtt = true;
+                                self.pending_replay_undecryptable = true;
                                 std.log.info("installed 0-RTT decrypt keys (server)", .{});
                             } else {
                                 self.early_data_seal = ik.seal;
@@ -2441,6 +2475,7 @@ pub const Connection = struct {
                         },
                         .handshake => {
                             self.installHandshakeKeys(ik.open, ik.seal);
+                            self.pending_replay_undecryptable = true;
                             // RFC 9001 §4.9.1: client stops sending Initial packets after
                             // receiving the first Handshake packet (which installs these keys).
                             // Drop the Initial seal to prevent the packer from generating
@@ -2461,6 +2496,7 @@ pub const Connection = struct {
                         },
                         .application => {
                             self.installAppKeys(ik.open, ik.seal);
+                            self.pending_replay_undecryptable = true;
                             if (self.qlog_writer) |*ql| {
                                 const now_ql: i64 = @intCast(sys.nanoTimestamp());
                                 ql.keyUpdated(now_ql, "tls", "server_1rtt_secret");
@@ -2487,9 +2523,10 @@ pub const Connection = struct {
                     // Clear early data keys (0-RTT period is over)
                     self.early_data_open = null;
                     self.early_data_seal = null;
-                    self.early_0rtt_count = 0;
-                    self.early_0rtt_used = 0;
-                    self.pending_replay_0rtt = false;
+                    // Handshake done: discard any still-buffered packets
+                    // (RFC 9001 §4.1.4 — peers retransmit if needed).
+                    self.undecryptable.reset();
+                    self.pending_replay_undecryptable = false;
 
                     // Handle 0-RTT rejection (RFC 9001 §4.1.2):
                     // When the server rejects 0-RTT, the client must retransmit all
