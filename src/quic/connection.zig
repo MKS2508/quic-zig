@@ -529,6 +529,11 @@ pub const ConnectionConfig = struct {
 
 /// A QUIC connection.
 ///
+// RFC 9001 §4.1.4: bounds for buffering 0-RTT packets received before the
+// early-data read key is installed (see Connection.early_0rtt_*).
+const EARLY_0RTT_BUF_LEN = 24 * 1024;
+const EARLY_0RTT_MAX_PKTS = 32;
+
 /// This is the central state machine that manages the QUIC protocol.
 /// Following quic-go's architecture, the connection runs an event-driven
 /// loop that processes received packets, handles timers, and sends data.
@@ -639,6 +644,19 @@ pub const Connection = struct {
     // 0-RTT (early data) keys
     early_data_open: ?quic_crypto.Open = null, // Server: decrypt 0-RTT packets
     early_data_seal: ?quic_crypto.Seal = null, // Client: encrypt 0-RTT packets
+
+    // RFC 9001 §4.1.4: a server may receive 0-RTT packets before the
+    // early-data read key is installed (the ClientHello can span several
+    // Initials, so the key is not ready when a fast peer bursts its 0-RTT).
+    // Buffer those packets here and replay them once the key is installed,
+    // instead of dropping them. Bounded to avoid memory amplification.
+    early_0rtt_buf: [EARLY_0RTT_BUF_LEN]u8 = undefined,
+    early_0rtt_off: [EARLY_0RTT_MAX_PKTS]u32 = undefined,
+    early_0rtt_plen: [EARLY_0RTT_MAX_PKTS]u16 = undefined,
+    early_0rtt_info: RecvInfo = undefined,
+    early_0rtt_used: u32 = 0,
+    early_0rtt_count: u8 = 0,
+    pending_replay_0rtt: bool = false,
 
     // Session ticket received from server (readable by application)
     session_ticket: ?tls13.SessionTicket = null,
@@ -1009,6 +1027,103 @@ pub const Connection = struct {
         });
     }
 
+    /// Decrypt and process a single 0-RTT packet (early data). Caller must
+    /// have `early_data_open` installed. Does not advance the handshake.
+    fn processZeroRttPacket(self: *Connection, header: *packet.Header, fbs: anytype, info: RecvInfo) !void {
+        std.log.info("recv: processing 0-RTT packet (early data)", .{});
+        // 0-RTT uses pkt_num_spaces[2] (application) for PN tracking
+        var space = self.pkt_num_spaces[2];
+        const saved_open = space.crypto_open;
+        space.crypto_open = self.early_data_open.?;
+        const payload = packet.decrypt(header, fbs, space) catch |err| {
+            std.log.err("can't decrypt 0-RTT packet. {any}", .{err});
+            space.crypto_open = saved_open;
+            return error.InvalidPacket;
+        };
+        space.crypto_open = saved_open;
+
+        if (payload.len == 0) {
+            self.closeWithTransportError(@intFromEnum(TransportError.protocol_violation), 0, "empty packet payload");
+            return error.InvalidPacket;
+        }
+
+        const now: i64 = @intCast(sys.nanoTimestamp());
+        self.last_packet_received_time = now;
+        self.keep_alive_ping_sent = false;
+        self.total_packets_received += 1;
+        if (info.datagram_size > 0) {
+            self.paths[self.active_path_idx].bytes_received += info.datagram_size;
+        }
+
+        // Process 0-RTT frames (STREAM, DATAGRAM etc. - no CRYPTO or HANDSHAKE_DONE)
+        var remaining = payload;
+        var ack_eliciting = false;
+        while (remaining.len > 0) {
+            if (remaining[0] == 0x00) {
+                remaining = remaining[1..];
+                continue;
+            }
+            const frame = Frame.parse(remaining) catch break;
+            // Enforce frame-in-correct-space (RFC 9000 §12.5)
+            if (!frame.isAllowedIn(.zero_rtt)) {
+                self.closeWithTransportError(@intFromEnum(TransportError.protocol_violation), @intFromEnum(FrameType.crypto), "frame not allowed in 0-RTT");
+                return error.ProtocolViolation;
+            }
+            if (frame.isAckEliciting()) ack_eliciting = true;
+            try self.processFrame(&frame, .application, now);
+            const consumed = self.frameSize(frame, remaining);
+            if (consumed == 0) break;
+            remaining = remaining[consumed..];
+        }
+        try self.pkt_handler.onPacketReceived(.application, header.packet_number, ack_eliciting, now, info.ecn);
+        if (header.packet_number + 1 > self.pkt_num_spaces[2].next_packet_number) {
+            self.pkt_num_spaces[2].next_packet_number = header.packet_number + 1;
+        }
+        if (self.state == .first_flight) self.state = .handshake;
+    }
+
+    /// RFC 9001 §4.1.4: store a 0-RTT packet received before the early-data
+    /// key is available, to be replayed later. Bounded; excess is dropped.
+    fn bufferEarly0Rtt(self: *Connection, header: *packet.Header, fbs: anytype, info: RecvInfo) void {
+        const pkt_len = (fbs.seek - header.packet_start) + header.remainder_len;
+        if (self.early_0rtt_count >= EARLY_0RTT_MAX_PKTS) return;
+        if (header.packet_start + pkt_len > fbs.buffer.len) return;
+        if (self.early_0rtt_used + pkt_len > EARLY_0RTT_BUF_LEN) return;
+        @memcpy(
+            self.early_0rtt_buf[self.early_0rtt_used..][0..pkt_len],
+            fbs.buffer[header.packet_start..][0..pkt_len],
+        );
+        self.early_0rtt_off[self.early_0rtt_count] = self.early_0rtt_used;
+        self.early_0rtt_plen[self.early_0rtt_count] = @intCast(pkt_len);
+        if (self.early_0rtt_count == 0) self.early_0rtt_info = info;
+        self.early_0rtt_used += @intCast(pkt_len);
+        self.early_0rtt_count += 1;
+        std.log.info("recv: buffered 0-RTT packet ({d} bytes; {d} buffered)", .{ pkt_len, self.early_0rtt_count });
+    }
+
+    /// Replay 0-RTT packets buffered before the early-data key was installed.
+    /// Called from recv() after advanceHandshake() returns (never re-entrantly
+    /// from inside the handshake action loop).
+    fn replayBufferedZeroRtt(self: *Connection) void {
+        const n = self.early_0rtt_count;
+        if (n == 0) return;
+        std.log.info("replaying {d} buffered 0-RTT packet(s)", .{n});
+        self.early_0rtt_count = 0;
+        self.early_0rtt_used = 0;
+        // Don't re-credit received bytes on replay (anti-amplification:
+        // keeps the server conservative — RFC 9000 §8.1).
+        var rinfo = self.early_0rtt_info;
+        rinfo.datagram_size = 0;
+        for (0..n) |i| {
+            const off = self.early_0rtt_off[i];
+            const len = self.early_0rtt_plen[i];
+            var rfbs = io.fixedBufferStream(self.early_0rtt_buf[off..][0..len]);
+            var h = packet.Header.parse(&rfbs, 0) catch continue;
+            self.processZeroRttPacket(&h, &rfbs, rinfo) catch continue;
+        }
+        self.advanceHandshake() catch {};
+    }
+
     /// Process a received packet.
     pub fn recv(self: *Connection, header: *packet.Header, fbs: anytype, info: RecvInfo) !void {
         // Guard: don't process packets in terminal states (RFC 9000 §10)
@@ -1055,63 +1170,13 @@ pub const Connection = struct {
         // 0-RTT packets use the application PN space but with early data keys
         if (epoch == packet.Epoch.zero_rtt) {
             if (self.early_data_open == null) {
-                std.log.info("recv: dropping 0-RTT packet (no early data keys)", .{});
+                // RFC 9001 §4.1.4: buffer rather than drop — the key is not
+                // yet installed (multi-Initial ClientHello). Replayed once
+                // the early-data key is installed.
+                self.bufferEarly0Rtt(header, fbs, info);
                 return;
             }
-
-            std.log.info("recv: processing 0-RTT packet (early data)", .{});
-            // 0-RTT uses pkt_num_spaces[2] (application) for PN tracking
-            var space = self.pkt_num_spaces[2];
-            var early_open = self.early_data_open.?;
-            // Temporarily install early keys in the space for decryption
-            const saved_open = space.crypto_open;
-            space.crypto_open = early_open;
-            const payload = packet.decrypt(header, fbs, space) catch |err| {
-                std.log.err("can't decrypt 0-RTT packet. {any}", .{err});
-                space.crypto_open = saved_open;
-                return error.InvalidPacket;
-            };
-            space.crypto_open = saved_open;
-            _ = &early_open;
-
-            if (payload.len == 0) {
-                self.closeWithTransportError(@intFromEnum(TransportError.protocol_violation), 0, "empty packet payload");
-                return error.InvalidPacket;
-            }
-
-            const now: i64 = @intCast(sys.nanoTimestamp());
-            self.last_packet_received_time = now;
-            self.keep_alive_ping_sent = false;
-            self.total_packets_received += 1;
-            if (info.datagram_size > 0) {
-                self.paths[self.active_path_idx].bytes_received += info.datagram_size;
-            }
-
-            // Process 0-RTT frames (STREAM, DATAGRAM etc. - no CRYPTO or HANDSHAKE_DONE)
-            var remaining = payload;
-            var ack_eliciting = false;
-            while (remaining.len > 0) {
-                if (remaining[0] == 0x00) {
-                    remaining = remaining[1..];
-                    continue;
-                }
-                const frame = Frame.parse(remaining) catch break;
-                // Enforce frame-in-correct-space (RFC 9000 §12.5)
-                if (!frame.isAllowedIn(.zero_rtt)) {
-                    self.closeWithTransportError(@intFromEnum(TransportError.protocol_violation), @intFromEnum(FrameType.crypto), "frame not allowed in 0-RTT");
-                    return error.ProtocolViolation;
-                }
-                if (frame.isAckEliciting()) ack_eliciting = true;
-                try self.processFrame(&frame, .application, now);
-                const consumed = self.frameSize(frame, remaining);
-                if (consumed == 0) break;
-                remaining = remaining[consumed..];
-            }
-            try self.pkt_handler.onPacketReceived(.application, header.packet_number, ack_eliciting, now, info.ecn);
-            if (header.packet_number + 1 > self.pkt_num_spaces[2].next_packet_number) {
-                self.pkt_num_spaces[2].next_packet_number = header.packet_number + 1;
-            }
-            if (self.state == .first_flight) self.state = .handshake;
+            try self.processZeroRttPacket(header, fbs, info);
             try self.advanceHandshake();
             return;
         }
@@ -1347,6 +1412,16 @@ pub const Connection = struct {
 
         // After processing crypto frames, try advancing the handshake
         try self.advanceHandshake();
+
+        // RFC 9001 §4.1.4: if the handshake just installed the early-data
+        // key (e.g. the ClientHello completed across multiple Initials),
+        // replay any 0-RTT packets that arrived before it was available.
+        // Done here, after advanceHandshake() returns, to avoid re-entering
+        // the handshake action loop where the key is installed.
+        if (self.pending_replay_0rtt) {
+            self.pending_replay_0rtt = false;
+            self.replayBufferedZeroRtt();
+        }
     }
 
     /// Queue CRYPTO frame retransmission by resetting the crypto stream's send offset.
@@ -2338,6 +2413,7 @@ pub const Connection = struct {
                         .early_data => {
                             if (self.is_server) {
                                 self.early_data_open = ik.open;
+                                self.pending_replay_0rtt = true;
                                 std.log.info("installed 0-RTT decrypt keys (server)", .{});
                             } else {
                                 self.early_data_seal = ik.seal;
@@ -2411,6 +2487,9 @@ pub const Connection = struct {
                     // Clear early data keys (0-RTT period is over)
                     self.early_data_open = null;
                     self.early_data_seal = null;
+                    self.early_0rtt_count = 0;
+                    self.early_0rtt_used = 0;
+                    self.pending_replay_0rtt = false;
 
                     // Handle 0-RTT rejection (RFC 9001 §4.1.2):
                     // When the server rejects 0-RTT, the client must retransmit all
