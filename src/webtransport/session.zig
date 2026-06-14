@@ -2079,8 +2079,33 @@ test "WT: invalid session ID triggers H3_ID_ERROR on bidi stream" {
     const ev = try setup.wt.poll();
     // Should return null (connection closed with H3_ID_ERROR)
     try testing.expect(ev == null);
-    // Connection should be closing
+    // Connection should be closing with H3_ID_ERROR (RFC 9114 §8.1)
     try testing.expect(setup.quic_conn.local_err != null);
+    try testing.expect(setup.quic_conn.local_err.?.is_app);
+    try testing.expectEqual(@intFromEnum(h3_conn.H3Error.id_error), setup.quic_conn.local_err.?.code);
+}
+
+test "WT: invalid session ID triggers H3_ID_ERROR on uni stream" {
+    var setup: WtTestSetup = undefined;
+    _ = try setup.initServer();
+    defer setup.deinit();
+
+    // Inject WT uni prefix with an invalid session ID (1 — not a client-initiated bidi = 4*n)
+    var prefix_buf: [16]u8 = undefined;
+    var fbs = io.fixedBufferStream(&prefix_buf);
+    packet.writeVarInt(&fbs, WT_UNI_STREAM_TYPE) catch unreachable;
+    packet.writeVarInt(&fbs, 1) catch unreachable; // Invalid: not divisible by 4
+
+    const rs = try setup.quic_conn.streams.getOrCreateRecvStream(14);
+    try rs.handleStreamFrame(0, fbs.buffered(), false);
+
+    const ev = try setup.wt.poll();
+    // Should return null (connection closed with H3_ID_ERROR)
+    try testing.expect(ev == null);
+    // Connection should be closing with H3_ID_ERROR (RFC 9114 §8.1)
+    try testing.expect(setup.quic_conn.local_err != null);
+    try testing.expect(setup.quic_conn.local_err.?.is_app);
+    try testing.expectEqual(@intFromEnum(h3_conn.H3Error.id_error), setup.quic_conn.local_err.?.code);
 }
 
 test "WT: uni stream to unknown session gets BUFFERED_STREAM_REJECTED" {
