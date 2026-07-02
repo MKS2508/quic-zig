@@ -16,7 +16,7 @@ const wt = @import("../webtransport/session.zig");
 
 /// Fixed-size CID key for use in HashMap lookups.
 pub const CidKey = struct {
-    buf: [20]u8 = .{0} ** 20,
+    buf: [20]u8 = @splat(0),
     len: u8 = 0,
 
     pub fn fromSlice(s: []const u8) CidKey {
@@ -59,7 +59,7 @@ pub const ConnEntry = struct {
 
     // Track which CIDs are registered in the routing map for this connection.
     // Max 8 from LocalCidPool + 1 initial client DCID = 9.
-    registered_cids: [9]CidKey = .{CidKey{}} ** 9,
+    registered_cids: [9]CidKey = @splat(CidKey{}),
     registered_cid_count: u8 = 0,
 
     fn addRegisteredCid(self: *ConnEntry, key: CidKey) void {

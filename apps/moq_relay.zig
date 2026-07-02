@@ -64,9 +64,9 @@ const Track = struct {
     pub_alias: u64 = 0,
     active: bool = false,
     // Subscribers waiting for objects on this track.
-    sub_client_idx: [MAX_SUBS_PER_TRACK]usize = [_]usize{0} ** MAX_SUBS_PER_TRACK,
-    sub_alias: [MAX_SUBS_PER_TRACK]u64 = [_]u64{0} ** MAX_SUBS_PER_TRACK,
-    sub_pending_initial: [MAX_SUBS_PER_TRACK]bool = [_]bool{false} ** MAX_SUBS_PER_TRACK,
+    sub_client_idx: [MAX_SUBS_PER_TRACK]usize = @splat(@as(usize, 0)),
+    sub_alias: [MAX_SUBS_PER_TRACK]u64 = @splat(@as(u64, 0)),
+    sub_pending_initial: [MAX_SUBS_PER_TRACK]bool = @splat(false),
     sub_count: usize = 0,
 
     fn matchesNsName(self: *const Track, ns: []const u8, name: []const u8) bool {
@@ -84,11 +84,11 @@ const Client = struct {
     impl_len: usize = 0,
     control_out: ?u64 = null,
     next_alias: u64 = 1,
-    stream_roles: [256]StreamRole = [_]StreamRole{.unknown} ** 256,
+    stream_roles: [256]StreamRole = @splat(StreamRole.unknown),
     // Slot-based buffer for streams currently being identified (role=.unknown)
     // or accumulating request messages that span multiple chunks.
-    slot_ids: [MAX_STREAM_SLOTS]u64 = [_]u64{std.math.maxInt(u64)} ** MAX_STREAM_SLOTS,
-    slot_bufs: [MAX_STREAM_SLOTS]StreamBuf = [_]StreamBuf{.{}} ** MAX_STREAM_SLOTS,
+    slot_ids: [MAX_STREAM_SLOTS]u64 = @splat(std.math.maxInt(u64)),
+    slot_bufs: [MAX_STREAM_SLOTS]StreamBuf = @splat(StreamBuf{}),
 
     fn setRole(self: *Client, sid: u64, role: StreamRole) void {
         if (sid < 256) self.stream_roles[@intCast(sid)] = role;
@@ -122,8 +122,8 @@ const Client = struct {
 const RelayHandler = struct {
     pub const protocol: event_loop.Protocol = .quic;
 
-    clients: [MAX_CLIENTS]Client = [_]Client{.{}} ** MAX_CLIENTS,
-    tracks: [MAX_TRACKS]Track = [_]Track{.{}} ** MAX_TRACKS,
+    clients: [MAX_CLIENTS]Client = @splat(Client{}),
+    tracks: [MAX_TRACKS]Track = @splat(Track{}),
     track_count: usize = 0,
     group_id: u64 = 0,
     last_tick_ns: i128 = 0,

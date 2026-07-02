@@ -61,12 +61,12 @@ const Track = struct {
     publisher_idx: ?usize = null,
     pub_alias: u64 = 0,
     active: bool = false,
-    sub_client_idx: [MAX_SUBS_PER_TRACK]usize = [_]usize{0} ** MAX_SUBS_PER_TRACK,
-    sub_alias: [MAX_SUBS_PER_TRACK]u64 = [_]u64{0} ** MAX_SUBS_PER_TRACK,
+    sub_client_idx: [MAX_SUBS_PER_TRACK]usize = @splat(@as(usize, 0)),
+    sub_alias: [MAX_SUBS_PER_TRACK]u64 = @splat(@as(u64, 0)),
     sub_count: usize = 0,
 
     // Completed groups cached for late subscribers.
-    cached: [N_CACHED_GROUPS]CachedGroup = [_]CachedGroup{.{}} ** N_CACHED_GROUPS,
+    cached: [N_CACHED_GROUPS]CachedGroup = @splat(CachedGroup{}),
     next_cache_idx: usize = 0,
     // The live group being assembled from the publisher's current stream.
     live: CachedGroup = .{},
@@ -107,10 +107,10 @@ const Client = struct {
     setup_sent: bool = false,
     setup_received: bool = false,
     next_alias: u64 = 1,
-    stream_ids: [MAX_STREAMS_PER_CLIENT]u64 = [_]u64{std.math.maxInt(u64)} ** MAX_STREAMS_PER_CLIENT,
-    stream_roles: [MAX_STREAMS_PER_CLIENT]StreamRole = [_]StreamRole{.unknown} ** MAX_STREAMS_PER_CLIENT,
-    stream_bufs: [MAX_STREAMS_PER_CLIENT]StreamBuf = [_]StreamBuf{.{}} ** MAX_STREAMS_PER_CLIENT,
-    fwd_states: [MAX_STREAMS_PER_CLIENT]FwdState = [_]FwdState{.{}} ** MAX_STREAMS_PER_CLIENT,
+    stream_ids: [MAX_STREAMS_PER_CLIENT]u64 = @splat(std.math.maxInt(u64)),
+    stream_roles: [MAX_STREAMS_PER_CLIENT]StreamRole = @splat(StreamRole.unknown),
+    stream_bufs: [MAX_STREAMS_PER_CLIENT]StreamBuf = @splat(StreamBuf{}),
+    fwd_states: [MAX_STREAMS_PER_CLIENT]FwdState = @splat(FwdState{}),
 
     fn findOrAddSlot(self: *Client, sid: u64) ?usize {
         for (self.stream_ids[0..], 0..) |id, i| {
@@ -178,16 +178,16 @@ const FwdState = struct {
     header_parsed: bool = false,
     forwarded_pos: usize = 0, // byte offset in publisher stream (after subgroup header)
     track_idx: ?usize = null,
-    out_stream_ids: [MAX_SUBS_PER_TRACK]u64 = [_]u64{0} ** MAX_SUBS_PER_TRACK,
-    out_sub_idx: [MAX_SUBS_PER_TRACK]usize = [_]usize{0} ** MAX_SUBS_PER_TRACK,
+    out_stream_ids: [MAX_SUBS_PER_TRACK]u64 = @splat(@as(u64, 0)),
+    out_sub_idx: [MAX_SUBS_PER_TRACK]usize = @splat(@as(usize, 0)),
     out_count: usize = 0,
 };
 
 const RelayHandler = struct {
     pub const protocol: event_loop.Protocol = .webtransport;
 
-    clients: [MAX_CLIENTS]Client = [_]Client{.{}} ** MAX_CLIENTS,
-    tracks: [MAX_TRACKS]Track = [_]Track{.{}} ** MAX_TRACKS,
+    clients: [MAX_CLIENTS]Client = @splat(Client{}),
+    tracks: [MAX_TRACKS]Track = @splat(Track{}),
     track_count: usize = 0,
 
     fn findOrCreateClient(self: *RelayHandler, entry: *cm.ConnEntry) ?usize {

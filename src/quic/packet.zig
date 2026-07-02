@@ -769,9 +769,9 @@ pub fn generateRetryToken(
 }
 
 pub const ValidatedToken = struct {
-    odcid_buf: [20]u8 = .{0} ** 20,
+    odcid_buf: [20]u8 = @splat(0),
     odcid_len: u8 = 0,
-    retry_scid_buf: [20]u8 = .{0} ** 20,
+    retry_scid_buf: [20]u8 = @splat(0),
     retry_scid_len: u8 = 0,
 
     pub fn getOdcid(self: *const ValidatedToken) []const u8 {

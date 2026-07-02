@@ -258,17 +258,17 @@ pub fn Server(comptime Handler: type) type {
             "onH0Data",         "onH0Finished",
         };
 
-        for (@typeInfo(Handler).@"struct".decls) |decl| {
-            if (decl.name.len >= 2 and decl.name[0] == 'o' and decl.name[1] == 'n') {
+        for (@typeInfo(Handler).@"struct".decl_names) |decl_name| {
+            if (decl_name.len >= 2 and decl_name[0] == 'o' and decl_name[1] == 'n') {
                 var found = false;
                 for (known) |k| {
-                    if (std.mem.eql(u8, decl.name, k)) {
+                    if (std.mem.eql(u8, decl_name, k)) {
                         found = true;
                         break;
                     }
                 }
                 if (!found) {
-                    @compileError("Handler has unrecognized callback '" ++ decl.name ++
+                    @compileError("Handler has unrecognized callback '" ++ decl_name ++
                         "'. Known callbacks: onRequest, onData, onConnectRequest, " ++
                         "onSessionReady, onStreamData, onDatagram, onSessionClosed, " ++
                         "onSessionDraining, onBidiStream, onUniStream, onPollComplete, " ++
@@ -278,7 +278,7 @@ pub fn Server(comptime Handler: type) type {
         }
 
         if (@hasDecl(Handler, "onStreamData")) {
-            const params = @typeInfo(@TypeOf(Handler.onStreamData)).@"fn".params;
+            const params = @typeInfo(@TypeOf(Handler.onStreamData)).@"fn".param_types;
             if (params.len != 4 and params.len != 5) {
                 @compileError("onStreamData must have 4 params (self, session, stream_id, data) " ++
                     "or 5 params (self, session, stream_id, data, fin)");
@@ -872,7 +872,7 @@ pub fn Server(comptime Handler: type) type {
         fn dispatchStreamData(self: *Self, session: *Session, stream_id: u64, data: []const u8, fin: bool) void {
             if (!@hasDecl(Handler, "onStreamData")) return;
 
-            if (comptime @typeInfo(@TypeOf(Handler.onStreamData)).@"fn".params.len == 5) {
+            if (comptime @typeInfo(@TypeOf(Handler.onStreamData)).@"fn".param_types.len == 5) {
                 self.handler.onStreamData(session, stream_id, data, fin);
             } else if (data.len > 0) {
                 self.handler.onStreamData(session, stream_id, data);
@@ -1356,17 +1356,17 @@ pub fn Client(comptime Handler: type) type {
             "onUniStream",
         };
 
-        for (@typeInfo(Handler).@"struct".decls) |decl| {
-            if (decl.name.len >= 2 and decl.name[0] == 'o' and decl.name[1] == 'n') {
+        for (@typeInfo(Handler).@"struct".decl_names) |decl_name| {
+            if (decl_name.len >= 2 and decl_name[0] == 'o' and decl_name[1] == 'n') {
                 var found = false;
                 for (known) |k| {
-                    if (std.mem.eql(u8, decl.name, k)) {
+                    if (std.mem.eql(u8, decl_name, k)) {
                         found = true;
                         break;
                     }
                 }
                 if (!found) {
-                    @compileError("Handler has unrecognized callback '" ++ decl.name ++
+                    @compileError("Handler has unrecognized callback '" ++ decl_name ++
                         "'. Known client callbacks: onConnected, onPollComplete, " ++
                         "onHeaders, onData, onFinished, onSettings, onGoaway, " ++
                         "onStreamData, " ++
@@ -1377,7 +1377,7 @@ pub fn Client(comptime Handler: type) type {
         }
 
         if (@hasDecl(Handler, "onStreamData")) {
-            const params = @typeInfo(@TypeOf(Handler.onStreamData)).@"fn".params;
+            const params = @typeInfo(@TypeOf(Handler.onStreamData)).@"fn".param_types;
             if (params.len != 4 and params.len != 5) {
                 @compileError("onStreamData must have 4 params (self, session, stream_id, data) " ++
                     "or 5 params (self, session, stream_id, data, fin)");
@@ -1805,7 +1805,7 @@ pub fn Client(comptime Handler: type) type {
         fn dispatchStreamData(self: *Self, session: *ClientSession, stream_id: u64, data: []const u8, fin: bool) void {
             if (!@hasDecl(Handler, "onStreamData")) return;
 
-            if (comptime @typeInfo(@TypeOf(Handler.onStreamData)).@"fn".params.len == 5) {
+            if (comptime @typeInfo(@TypeOf(Handler.onStreamData)).@"fn".param_types.len == 5) {
                 self.handler.onStreamData(session, stream_id, data, fin);
             } else if (data.len > 0) {
                 self.handler.onStreamData(session, stream_id, data);

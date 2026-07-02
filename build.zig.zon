@@ -3,12 +3,12 @@
     .version = "0.2.0",
     .dependencies = .{
         .libxev = .{
-            .url = "https://github.com/mitchellh/libxev/archive/a82a04eabb46.tar.gz",
-            .hash = "libxev-0.0.0-86vtcwIRFACVrx54GaHsMFFlyC4dTi0tcVh10V7btRUc",
+            .url = "https://github.com/MKS2508/libxev/archive/99e0031543ad389a3ec2cbd24695fc065d405e23.tar.gz",
+            .hash = "libxev-0.0.0-86vtc3UUFACrTO9EO8cPwh8o1luUC03TKUWQ271U8gNe",
         },
     },
     .fingerprint = 0xc079525234abfc4c,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",

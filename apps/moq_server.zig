@@ -36,12 +36,12 @@ const MoqServerHandler = struct {
     peer_control: ?u64 = null,
     setup_sent: bool = false,
     setup_received: bool = false,
-    subscribers: [MAX_SUBSCRIBERS]Subscriber = [_]Subscriber{.{}} ** MAX_SUBSCRIBERS,
+    subscribers: [MAX_SUBSCRIBERS]Subscriber = @splat(Subscriber{}),
     subscriber_count: usize = 0,
     group_id: u64 = 0,
     last_tick_ns: i128 = 0,
 
-    stream_roles: [256]StreamRole = [_]StreamRole{.unknown} ** 256,
+    stream_roles: [256]StreamRole = @splat(StreamRole.unknown),
 
     fn setRole(self: *MoqServerHandler, sid: u64, role: StreamRole) void {
         if (sid < 256) self.stream_roles[@intCast(sid)] = role;

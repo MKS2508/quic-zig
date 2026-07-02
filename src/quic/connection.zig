@@ -45,7 +45,7 @@ pub const PathValidationState = enum {
 };
 
 pub const PathValidator = struct {
-    challenge_data: [8]u8 = .{0} ** 8,
+    challenge_data: [8]u8 = @splat(0),
     state: PathValidationState = .idle,
     challenge_sent_time: i64 = 0,
     retries: u8 = 0,
@@ -129,10 +129,10 @@ pub const NetworkPath = struct {
 };
 
 pub const ConnectionIdEntry = struct {
-    cid_buf: [20]u8 = .{0} ** 20,
+    cid_buf: [20]u8 = @splat(0),
     cid_len: u8 = 0,
     seq_num: u64 = 0,
-    stateless_reset_token: [16]u8 = .{0} ** 16,
+    stateless_reset_token: [16]u8 = @splat(0),
     in_use: bool = false,
     occupied: bool = false,
 
@@ -144,7 +144,7 @@ pub const ConnectionIdEntry = struct {
 pub const ConnectionIdPool = struct {
     const MAX_POOL_SIZE: usize = 8;
 
-    entries: [MAX_POOL_SIZE]ConnectionIdEntry = .{ConnectionIdEntry{}} ** MAX_POOL_SIZE,
+    entries: [MAX_POOL_SIZE]ConnectionIdEntry = @splat(ConnectionIdEntry{}),
 
     pub fn addPeerCid(self: *ConnectionIdPool, seq_num: u64, cid: []const u8, reset_token: [16]u8) void {
         // Find a free slot
@@ -200,10 +200,10 @@ pub const ConnectionIdPool = struct {
 
 /// Tracks a locally-issued connection ID (RFC 9000 §5.1).
 pub const LocalCidEntry = struct {
-    cid_buf: [20]u8 = .{0} ** 20,
+    cid_buf: [20]u8 = @splat(0),
     cid_len: u8 = 0,
     seq_num: u64 = 0,
-    stateless_reset_token: [16]u8 = .{0} ** 16,
+    stateless_reset_token: [16]u8 = @splat(0),
     occupied: bool = false,
     retired: bool = false,
 
@@ -217,7 +217,7 @@ pub const LocalCidEntry = struct {
 pub const LocalCidPool = struct {
     const MAX_POOL_SIZE: usize = 8;
 
-    entries: [MAX_POOL_SIZE]LocalCidEntry = .{LocalCidEntry{}} ** MAX_POOL_SIZE,
+    entries: [MAX_POOL_SIZE]LocalCidEntry = @splat(LocalCidEntry{}),
     next_seq_num: u64 = 1,
     retire_prior_to: u64 = 0,
 
@@ -331,8 +331,8 @@ pub const DatagramQueue = struct {
 
     allocator: ?std.mem.Allocator = null,
     bufs_static: [DEFAULT_MAX_ITEMS][MAX_DATAGRAM_SIZE]u8 = undefined,
-    lens_static: [DEFAULT_MAX_ITEMS]usize = .{0} ** DEFAULT_MAX_ITEMS,
-    times_static: [DEFAULT_MAX_ITEMS]i64 = .{0} ** DEFAULT_MAX_ITEMS,
+    lens_static: [DEFAULT_MAX_ITEMS]usize = @splat(0),
+    times_static: [DEFAULT_MAX_ITEMS]i64 = @splat(0),
     bufs_dynamic: ?[][MAX_DATAGRAM_SIZE]u8 = null,
     lens_dynamic: ?[]usize = null,
     times_dynamic: ?[]i64 = null,
@@ -575,9 +575,9 @@ pub const Connection = struct {
     allocator: std.mem.Allocator,
 
     // Connection IDs
-    dcid: [packet.CONNECTION_ID_MAX_SIZE]u8 = .{0} ** packet.CONNECTION_ID_MAX_SIZE,
+    dcid: [packet.CONNECTION_ID_MAX_SIZE]u8 = @splat(0),
     dcid_len: u8 = 0,
-    scid: [packet.CONNECTION_ID_MAX_SIZE]u8 = .{0} ** packet.CONNECTION_ID_MAX_SIZE,
+    scid: [packet.CONNECTION_ID_MAX_SIZE]u8 = @splat(0),
     scid_len: u8 = 0,
 
     // TLS 1.3 handshake (null if not configured with TlsConfig)
@@ -618,7 +618,7 @@ pub const Connection = struct {
     local_cid_pool: LocalCidPool = .{},
 
     // Static key for deterministic stateless reset tokens (RFC 9000 §10.3)
-    static_reset_key: [16]u8 = .{0} ** 16,
+    static_reset_key: [16]u8 = @splat(0),
 
     // QUIC-LB CID encoding config (server-side, for load balancer routing)
     quic_lb_config: ?quic_lb.Config = null,
@@ -690,11 +690,11 @@ pub const Connection = struct {
     remembered_params: ?tls13.SessionTicket = null,
 
     // NEW_TOKEN received from server (client stores for reuse in future connections)
-    new_token_buf: [packet.TOKEN_MAX_LEN]u8 = .{0} ** packet.TOKEN_MAX_LEN,
+    new_token_buf: [packet.TOKEN_MAX_LEN]u8 = @splat(0),
     new_token_len: u8 = 0,
 
     // Token key for NEW_TOKEN generation (server, shared with retry_token_key)
-    token_key: [16]u8 = .{0} ** 16,
+    token_key: [16]u8 = @splat(0),
 
     // ECN validation: peer-reported ECN counts from ACK_ECN frames (RFC 9000 §13.4.2.1)
     // Track per-space to detect increases; only Application space matters in practice
@@ -715,7 +715,7 @@ pub const Connection = struct {
     largest_pn_received: ?u64 = null, // Tracks largest 1-RTT PN for spin bit toggling
     enable_v2: bool = false, // Compatible Version Negotiation (RFC 9368/9369)
     // DCID used for initial key derivation (needed for v2 re-derivation)
-    initial_dcid_buf: [packet.CONNECTION_ID_MAX_SIZE]u8 = .{0} ** packet.CONNECTION_ID_MAX_SIZE,
+    initial_dcid_buf: [packet.CONNECTION_ID_MAX_SIZE]u8 = @splat(0),
     initial_dcid_len: u8 = 0,
 
     // QLOG structured logging (optional, enabled via QLOGDIR)
@@ -731,10 +731,10 @@ pub const Connection = struct {
     needs_close_retransmit: bool = false,
 
     // Retry state (client-side)
-    odcid_buf: [packet.CONNECTION_ID_MAX_SIZE]u8 = .{0} ** packet.CONNECTION_ID_MAX_SIZE,
+    odcid_buf: [packet.CONNECTION_ID_MAX_SIZE]u8 = @splat(0),
     odcid_len: u8 = 0,
     retry_received: bool = false,
-    retry_token_buf: [256]u8 = .{0} ** 256,
+    retry_token_buf: [256]u8 = @splat(0),
     retry_token_len: u16 = 0,
 
     // Timing
@@ -4430,8 +4430,9 @@ test "connect: create client connection" {
 }
 
 test "Connection: init and basic state" {
-    const dcid_val = "dest1234" ++ ([_]u8{0} ** 12);
-    const scid_val = "src12345" ++ ([_]u8{0} ** 12);
+    const zero_12: [12]u8 = @splat(0);
+    const dcid_val = "dest1234" ++ zero_12;
+    const scid_val = "src12345" ++ zero_12;
 
     var conn = Connection{
         .allocator = std.testing.allocator,
@@ -4465,7 +4466,7 @@ test "Connection: init and basic state" {
 test "ConnectionIdPool: add and consume" {
     var pool = ConnectionIdPool{};
     const cid1 = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
-    const token1 = [_]u8{0xAA} ** 16;
+    const token1: [16]u8 = @splat(@as(u8, 0xAA));
     pool.addPeerCid(1, &cid1, token1);
 
     try std.testing.expectEqual(@as(usize, 1), pool.count());
@@ -4481,7 +4482,7 @@ test "ConnectionIdPool: add and consume" {
 
 test "ConnectionIdPool: retire prior to" {
     var pool = ConnectionIdPool{};
-    const token = [_]u8{0} ** 16;
+    const token: [16]u8 = @splat(@as(u8, 0));
     pool.addPeerCid(0, &[_]u8{ 0x01, 0x02 }, token);
     pool.addPeerCid(1, &[_]u8{ 0x03, 0x04 }, token);
     pool.addPeerCid(2, &[_]u8{ 0x05, 0x06 }, token);
@@ -4497,7 +4498,7 @@ test "ConnectionIdPool: retire prior to" {
 
 test "ConnectionIdPool: remove by seq" {
     var pool = ConnectionIdPool{};
-    const token = [_]u8{0} ** 16;
+    const token: [16]u8 = @splat(@as(u8, 0));
     pool.addPeerCid(5, &[_]u8{ 0x01, 0x02, 0x03 }, token);
     pool.addPeerCid(6, &[_]u8{ 0x04, 0x05, 0x06 }, token);
 
@@ -4508,7 +4509,7 @@ test "ConnectionIdPool: remove by seq" {
 
 test "ConnectionIdPool: pool full" {
     var pool = ConnectionIdPool{};
-    const token = [_]u8{0} ** 16;
+    const token: [16]u8 = @splat(@as(u8, 0));
     var i: u64 = 0;
     while (i < ConnectionIdPool.MAX_POOL_SIZE + 2) : (i += 1) {
         pool.addPeerCid(i, &[_]u8{@intCast(i)}, token);
@@ -4531,7 +4532,7 @@ test "PathValidator: wrong response" {
     var validator = PathValidator{};
     _ = validator.startChallenge();
 
-    const wrong_data = [_]u8{0xFF} ** 8;
+    const wrong_data: [8]u8 = @splat(@as(u8, 0xFF));
     try std.testing.expect(!validator.handleResponse(wrong_data));
     try std.testing.expectEqual(PathValidationState.pending, validator.state);
 }
@@ -4652,7 +4653,7 @@ test "DatagramQueue: full queue" {
 
 test "DatagramQueue: oversized datagram rejected" {
     var q = DatagramQueue{};
-    const big = [_]u8{0xAA} ** (DatagramQueue.MAX_DATAGRAM_SIZE + 1);
+    const big: [DatagramQueue.MAX_DATAGRAM_SIZE + 1]u8 = @splat(@as(u8, 0xAA));
     try std.testing.expect(!q.push(&big));
     try std.testing.expect(q.isEmpty());
 }
@@ -4758,7 +4759,7 @@ test "sockaddrSameIp: different IPs" {
 
 test "isV4Mapped: IPv4-mapped IPv6" {
     // ::ffff:127.0.0.1
-    var addr_bytes = [_]u8{0} ** 16;
+    var addr_bytes: [16]u8 = @splat(@as(u8, 0));
     addr_bytes[10] = 0xff;
     addr_bytes[11] = 0xff;
     addr_bytes[12] = 127;
@@ -4771,7 +4772,7 @@ test "isV4Mapped: IPv4-mapped IPv6" {
 
 test "isV4Mapped: regular IPv6 is not mapped" {
     // ::1 (loopback)
-    var addr_bytes = [_]u8{0} ** 16;
+    var addr_bytes: [16]u8 = @splat(@as(u8, 0));
     addr_bytes[15] = 1;
     const addr = makeIpv6Addr(addr_bytes, 4433);
     try std.testing.expect(!isV4Mapped(&addr));
@@ -4788,7 +4789,7 @@ test "isEffectivelyV4: IPv4" {
 }
 
 test "isEffectivelyV4: IPv4-mapped IPv6" {
-    var addr_bytes = [_]u8{0} ** 16;
+    var addr_bytes: [16]u8 = @splat(@as(u8, 0));
     addr_bytes[10] = 0xff;
     addr_bytes[11] = 0xff;
     addr_bytes[12] = 10;
@@ -4800,7 +4801,7 @@ test "isEffectivelyV4: IPv4-mapped IPv6" {
 }
 
 test "isEffectivelyV4: native IPv6 is not v4" {
-    var addr_bytes = [_]u8{0} ** 16;
+    var addr_bytes: [16]u8 = @splat(@as(u8, 0));
     addr_bytes[0] = 0x20;
     addr_bytes[1] = 0x01;
     const addr = makeIpv6Addr(addr_bytes, 80);
@@ -4811,7 +4812,7 @@ test "sockaddrLen: IPv4 vs IPv6" {
     const v4 = makeIpv4Addr(127, 0, 0, 1, 80);
     try std.testing.expectEqual(@as(posix.socklen_t, @sizeOf(posix.sockaddr.in)), sockaddrLen(&v4));
 
-    var v6_bytes = [_]u8{0} ** 16;
+    var v6_bytes: [16]u8 = @splat(@as(u8, 0));
     v6_bytes[15] = 1;
     const v6 = makeIpv6Addr(v6_bytes, 80);
     try std.testing.expectEqual(@as(posix.socklen_t, @sizeOf(posix.sockaddr.in6)), sockaddrLen(&v6));
@@ -4820,8 +4821,9 @@ test "sockaddrLen: IPv4 vs IPv6" {
 // --- Connection state and method tests ---
 
 fn testConnection(allocator: std.mem.Allocator) Connection {
-    const dcid_val = "dest1234" ++ ([_]u8{0} ** 12);
-    const scid_val = "src12345" ++ ([_]u8{0} ** 12);
+    const zero_12b: [12]u8 = @splat(0);
+    const dcid_val = "dest1234" ++ zero_12b;
+    const scid_val = "src12345" ++ zero_12b;
     return Connection{
         .allocator = allocator,
         .is_server = true,
@@ -4922,7 +4924,7 @@ test "Connection: DatagramTooLarge vs DatagramQueueFull" {
     conn.datagrams_enabled = true;
 
     // Too-large payload → permanent error
-    const big = [_]u8{0xAA} ** (DatagramQueue.MAX_DATAGRAM_SIZE + 1);
+    const big: [DatagramQueue.MAX_DATAGRAM_SIZE + 1]u8 = @splat(@as(u8, 0xAA));
     try std.testing.expectError(error.DatagramTooLarge, conn.sendDatagram(&big));
 
     // Fill the queue → transient error
@@ -5072,7 +5074,7 @@ test "Connection: matchesStatelessReset with no tokens" {
     var conn = testConnection(std.testing.allocator);
     defer conn.deinit();
 
-    const data = [_]u8{0xAA} ** 32;
+    const data: [32]u8 = @splat(@as(u8, 0xAA));
     try std.testing.expect(!conn.matchesStatelessReset(&data));
 }
 
@@ -5081,7 +5083,7 @@ test "Connection: matchesStatelessReset with matching token" {
     defer conn.deinit();
 
     // Add a peer CID with a known reset token
-    const token = [_]u8{0xBB} ** 16;
+    const token: [16]u8 = @splat(@as(u8, 0xBB));
     const cid = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
     conn.peer_cid_pool.addPeerCid(1, &cid, token);
 

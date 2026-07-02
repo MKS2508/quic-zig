@@ -757,7 +757,7 @@ pub const PendingControlFrame = union(enum) {
         limit: u64,
     },
     new_token: struct {
-        token_buf: [92]u8 = .{0} ** 92,
+        token_buf: [92]u8 = @splat(0),
         token_len: u8 = 0,
     },
     reset_stream: struct {

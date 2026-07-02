@@ -324,8 +324,8 @@ pub const KeySchedule = struct {
     server_handshake_traffic_secret: [32]u8,
     client_app_traffic_secret: [32]u8,
     server_app_traffic_secret: [32]u8,
-    resumption_master_secret: [32]u8 = .{0} ** 32,
-    client_early_traffic_secret: [32]u8 = .{0} ** 32,
+    resumption_master_secret: [32]u8 = @splat(0),
+    client_early_traffic_secret: [32]u8 = @splat(0),
     computed_handshake: bool = false,
     computed_app: bool = false,
 
@@ -333,11 +333,12 @@ pub const KeySchedule = struct {
         var ks: KeySchedule = undefined;
         ks.computed_handshake = false;
         ks.computed_app = false;
-        ks.resumption_master_secret = .{0} ** 32;
-        ks.client_early_traffic_secret = .{0} ** 32;
+        ks.resumption_master_secret = @splat(0);
+        ks.client_early_traffic_secret = @splat(0);
         // early_secret = HKDF-Extract(salt=0, IKM=0)
-        const zero_key: [32]u8 = .{0} ** 32;
-        ks.early_secret = HkdfSha256.extract(&(.{0} ** 1), &zero_key);
+        const zero_key: [32]u8 = @splat(0);
+        const zero_salt: [1]u8 = @splat(0);
+        ks.early_secret = HkdfSha256.extract(&zero_salt, &zero_key);
         return ks;
     }
 
@@ -346,10 +347,11 @@ pub const KeySchedule = struct {
         var ks: KeySchedule = undefined;
         ks.computed_handshake = false;
         ks.computed_app = false;
-        ks.resumption_master_secret = .{0} ** 32;
-        ks.client_early_traffic_secret = .{0} ** 32;
+        ks.resumption_master_secret = @splat(0);
+        ks.client_early_traffic_secret = @splat(0);
         // early_secret = HKDF-Extract(salt=0, IKM=PSK)
-        ks.early_secret = HkdfSha256.extract(&(.{0} ** 1), &psk);
+        const zero_salt2: [1]u8 = @splat(0);
+        ks.early_secret = HkdfSha256.extract(&zero_salt2, &psk);
         return ks;
     }
 
@@ -388,7 +390,7 @@ pub const KeySchedule = struct {
         const derived2 = deriveSecret(self.handshake_secret, "derived", empty_hash);
 
         // master_secret = HKDF-Extract(derived2, 0)
-        const zero_key: [32]u8 = .{0} ** 32;
+        const zero_key: [32]u8 = @splat(0);
         self.master_secret = HkdfSha256.extract(&derived2, &zero_key);
 
         // c_ap_traffic = Derive-Secret(master_secret, "c ap traffic", transcript)
@@ -466,13 +468,13 @@ pub const KeySchedule = struct {
 
 pub const SessionTicket = struct {
     psk: [32]u8, // Pre-shared key derived from resumption_master_secret
-    ticket: [512]u8 = .{0} ** 512, // Opaque ticket data (encrypted by server)
+    ticket: [512]u8 = @splat(0), // Opaque ticket data (encrypted by server)
     ticket_len: u16 = 0,
     ticket_age_add: u32 = 0, // Age obfuscation value
     creation_time: i64 = 0, // Seconds since epoch
     lifetime: u32 = 0, // Seconds
     max_early_data_size: u32 = 0, // From early_data extension
-    alpn: [16]u8 = .{0} ** 16, // Negotiated ALPN
+    alpn: [16]u8 = @splat(0), // Negotiated ALPN
     alpn_len: u8 = 0,
 
     // RFC 9000 §7.4.1: remembered transport parameters for 0-RTT
@@ -657,7 +659,7 @@ pub const Tls13Handshake = struct {
     client_random: [32]u8 = undefined,
 
     // Peer's legacy_session_id from ClientHello (must be echoed in ServerHello)
-    peer_session_id: [32]u8 = .{0} ** 32,
+    peer_session_id: [32]u8 = @splat(0),
     peer_session_id_len: u8 = 0,
 
     // Server hello random
@@ -711,7 +713,7 @@ pub const Tls13Handshake = struct {
         self.received_ticket = null;
         self.ticket_nonce_counter = 0;
         self.peer_session_id_len = 0;
-        self.peer_session_id = .{0} ** 32;
+        self.peer_session_id = @splat(0);
 
         // Pre-encode transport params to avoid dangling slices after struct move
         var tp_fbs = io.fixedBufferStream(&self.tp_encoded);
@@ -764,7 +766,7 @@ pub const Tls13Handshake = struct {
         self.received_ticket = null;
         self.ticket_nonce_counter = 0;
         self.peer_session_id_len = 0;
-        self.peer_session_id = .{0} ** 32;
+        self.peer_session_id = @splat(0);
 
         // Pre-encode transport params to avoid dangling slices after struct move
         var tp_fbs = io.fixedBufferStream(&self.tp_encoded);
@@ -1706,7 +1708,7 @@ pub const Tls13Handshake = struct {
         const ticket_age_add = std.mem.readInt(u32, &ticket_age_add_bytes, .big);
 
         // Build ticket plaintext: psk(32) || creation_time(8) || alpn_len(1) || alpn
-        var ticket_plain: [64]u8 = .{0} ** 64;
+        var ticket_plain: [64]u8 = @splat(0);
         @memcpy(ticket_plain[0..32], &psk);
         const now_sec = @divTrunc(sys.nanoTimestamp(), std.time.ns_per_s);
         std.mem.writeInt(i64, ticket_plain[32..40], now_sec, .big);
@@ -1717,7 +1719,7 @@ pub const Tls13Handshake = struct {
         const plaintext_len = 41 + @as(usize, alpn_copy_len);
 
         // Encrypt ticket with AES-128-GCM using ticket_key
-        var nonce_for_ticket: [12]u8 = .{0} ** 12;
+        var nonce_for_ticket: [12]u8 = @splat(0);
         @memcpy(nonce_for_ticket[8..12], &nonce_buf);
         var encrypted_ticket: [80]u8 = undefined; // plaintext + 16 tag
         var tag: [16]u8 = undefined;
@@ -1835,7 +1837,7 @@ pub const Tls13Handshake = struct {
         const ciphertext_len = identity_len - 16;
 
         // Reconstruct nonce from ticket (we use the last 4 bytes of identity as hint)
-        var ticket_nonce: [12]u8 = .{0} ** 12;
+        var ticket_nonce: [12]u8 = @splat(0);
         // Use zeros as nonce — server encrypts with incrementing nonce_buf in [8..12]
         // We need to try nonce counter values. For simplicity, try a few.
         var decrypted: [64]u8 = undefined;
@@ -2770,10 +2772,11 @@ test "TranscriptHash: basic usage" {
 test "KeySchedule: derive-secret produces known output for zeros" {
     // Verify early_secret matches the known value
     var ks = KeySchedule.init();
-    const zero_key: [32]u8 = .{0} ** 32;
+    const zero_key: [32]u8 = @splat(0);
 
     // early_secret should be HKDF-Extract(salt=0x00, IKM=0x00*32)
-    const expected_early = HkdfSha256.extract(&(.{0} ** 1), &zero_key);
+    const zero_salt: [1]u8 = @splat(0);
+    const expected_early = HkdfSha256.extract(&zero_salt, &zero_key);
     try std.testing.expectEqualSlices(u8, &expected_early, &ks.early_secret);
 
     // Derive handshake with a fake shared secret and transcript
@@ -2784,17 +2787,18 @@ test "KeySchedule: derive-secret produces known output for zeros" {
     ks.deriveHandshakeSecrets(&fake_shared, fake_transcript);
 
     // Verify secrets are not all-zero (sanity check)
-    try std.testing.expect(!std.mem.eql(u8, &ks.client_handshake_traffic_secret, &(.{0} ** 32)));
-    try std.testing.expect(!std.mem.eql(u8, &ks.server_handshake_traffic_secret, &(.{0} ** 32)));
+    const zero_32a: [32]u8 = @splat(0);
+    try std.testing.expect(!std.mem.eql(u8, &ks.client_handshake_traffic_secret, &zero_32a));
+    try std.testing.expect(!std.mem.eql(u8, &ks.server_handshake_traffic_secret, &zero_32a));
 
     // Derive app secrets
     ks.deriveAppSecrets(fake_transcript);
-    try std.testing.expect(!std.mem.eql(u8, &ks.client_app_traffic_secret, &(.{0} ** 32)));
+    try std.testing.expect(!std.mem.eql(u8, &ks.client_app_traffic_secret, &zero_32a));
 }
 
 test "KeySchedule: finished verify_data" {
-    const secret: [32]u8 = .{0x42} ** 32;
-    const transcript: [32]u8 = .{0x01} ** 32;
+    const secret: [32]u8 = @splat(0x42);
+    const transcript: [32]u8 = @splat(0x01);
     const vd = KeySchedule.computeFinishedVerifyData(secret, transcript);
 
     // Verify it's deterministic
@@ -2802,7 +2806,7 @@ test "KeySchedule: finished verify_data" {
     try std.testing.expectEqualSlices(u8, &vd, &vd2);
 
     // Different inputs produce different output
-    const vd3 = KeySchedule.computeFinishedVerifyData(secret, .{0x02} ** 32);
+    const vd3 = KeySchedule.computeFinishedVerifyData(secret, @splat(0x02));
     try std.testing.expect(!std.mem.eql(u8, &vd, &vd3));
 }
 
@@ -2967,7 +2971,7 @@ test "loopback handshake: client and server complete" {
 
 // PSK binder computation test
 test "PSK binder computation: deterministic and correct" {
-    const psk: [32]u8 = .{0x42} ** 32;
+    const psk: [32]u8 = @splat(0x42);
     var ks = KeySchedule.initWithPsk(psk);
 
     // early_secret should differ from zero-PSK init
@@ -2980,7 +2984,7 @@ test "PSK binder computation: deterministic and correct" {
     const binder_key = quic_crypto.hkdfExpandLabel(ks.early_secret, "res binder", &empty_hash, 32);
 
     // Compute binder for a fake partial transcript
-    const fake_transcript: [32]u8 = .{0x01} ** 32;
+    const fake_transcript: [32]u8 = @splat(0x01);
     const binder = KeySchedule.computeFinishedVerifyData(binder_key, fake_transcript);
 
     // Deterministic
@@ -2988,25 +2992,28 @@ test "PSK binder computation: deterministic and correct" {
     try std.testing.expectEqualSlices(u8, &binder, &binder2);
 
     // Different transcript produces different binder
-    const binder3 = KeySchedule.computeFinishedVerifyData(binder_key, .{0x02} ** 32);
+    const binder3 = KeySchedule.computeFinishedVerifyData(binder_key, @splat(0x02));
     try std.testing.expect(!std.mem.eql(u8, &binder, &binder3));
 }
 
 // Early key derivation test
 test "early key derivation: client_early_traffic_secret from PSK" {
-    const psk: [32]u8 = .{0xAA} ** 32;
+    const psk: [32]u8 = @splat(0xAA);
     var ks = KeySchedule.initWithPsk(psk);
 
-    const transcript: [32]u8 = .{0xBB} ** 32;
+    const transcript: [32]u8 = @splat(0xBB);
     ks.deriveEarlyDataSecret(transcript);
 
     // Should produce a non-zero secret
-    try std.testing.expect(!std.mem.eql(u8, &ks.client_early_traffic_secret, &(.{0} ** 32)));
+    const zero_32b: [32]u8 = @splat(0);
+    try std.testing.expect(!std.mem.eql(u8, &ks.client_early_traffic_secret, &zero_32b));
 
     // Derive QUIC keys from early traffic secret
     const keys = KeySchedule.deriveQuicKeys(ks.client_early_traffic_secret);
-    try std.testing.expect(!std.mem.eql(u8, &keys.key, &(.{0} ** 16)));
-    try std.testing.expect(!std.mem.eql(u8, &keys.iv, &(.{0} ** 12)));
+    const zero_16: [16]u8 = @splat(0);
+    const zero_12: [12]u8 = @splat(0);
+    try std.testing.expect(!std.mem.eql(u8, &keys.key, &zero_16));
+    try std.testing.expect(!std.mem.eql(u8, &keys.iv, &zero_12));
 }
 
 // Loopback PSK resumption test: full handshake → ticket → PSK handshake
@@ -3179,8 +3186,8 @@ test "loopback PSK resumption: two handshakes with session ticket" {
 
 // NewSessionTicket roundtrip test
 test "NewSessionTicket: build and parse roundtrip" {
-    const psk: [32]u8 = .{0x55} ** 32;
-    const ticket_data = [_]u8{0xAA} ** 64;
+    const psk: [32]u8 = @splat(0x55);
+    const ticket_data: [64]u8 = @splat(@as(u8, 0xAA));
 
     // Build a SessionTicket manually
     var original = SessionTicket{ .psk = psk };

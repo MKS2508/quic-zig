@@ -93,7 +93,7 @@ pub const WebTransportConnection = struct {
     h3: *h3_conn.H3Connection,
     quic: *quic_connection.Connection,
     is_server: bool,
-    sessions: [MAX_SESSIONS]Session = .{Session{}} ** MAX_SESSIONS,
+    sessions: [MAX_SESSIONS]Session = @splat(Session{}),
     active_session_count: u32 = 0,
 
     // Track which bidi/uni streams belong to WT sessions
@@ -1069,8 +1069,9 @@ const packet_packer = @import("../quic/packet_packer.zig");
 const protocol = @import("../quic/protocol.zig");
 
 fn createTestQuicConn(is_server: bool) quic_connection.Connection {
-    const dcid = "testdcid" ++ ([_]u8{0} ** 12);
-    const scid = "testscid" ++ ([_]u8{0} ** 12);
+    const zero_12: [12]u8 = @splat(0);
+    const dcid = "testdcid" ++ zero_12;
+    const scid = "testscid" ++ zero_12;
 
     var conn = quic_connection.Connection{
         .allocator = testing.allocator,

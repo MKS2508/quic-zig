@@ -1525,8 +1525,9 @@ const protocol = @import("../quic/protocol.zig");
 // Create a minimal QUIC Connection suitable for H3 tests.
 // The `is_server` flag determines stream ID assignment (server bidi starts at 1, client at 0).
 fn createTestQuicConn(is_server: bool) quic_connection.Connection {
-    const dcid = "testdcid" ++ ([_]u8{0} ** 12);
-    const scid = "testscid" ++ ([_]u8{0} ** 12);
+    const zero_12: [12]u8 = @splat(0);
+    const dcid = "testdcid" ++ zero_12;
+    const scid = "testscid" ++ zero_12;
 
     var conn = quic_connection.Connection{
         .allocator = testing.allocator,

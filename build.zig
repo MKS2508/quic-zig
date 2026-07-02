@@ -60,7 +60,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe_interop_client_manual);
     const run_interop_client_manual = b.addRunArtifact(exe_interop_client_manual);
     run_interop_client_manual.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_interop_client_manual.addArgs(args);
+    run_interop_client_manual.addPassthruArgs();
     b.step("run-interop-client-manual", "Run interop runner client (manual event loop)")
         .dependOn(&run_interop_client_manual.step);
 
@@ -120,14 +120,14 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe_client);
     const run_client = b.addRunArtifact(exe_client);
     run_client.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_client.addArgs(args);
+    run_client.addPassthruArgs();
     b.step("run-client", "Run QUIC client").dependOn(&run_client.step);
 
     const exe_h3_client = App.add(b, "h3-client", "apps/h3_client.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_h3_client);
     const run_h3_client = b.addRunArtifact(exe_h3_client);
     run_h3_client.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_h3_client.addArgs(args);
+    run_h3_client.addPassthruArgs();
     b.step("run-h3-client", "Run H3 client").dependOn(&run_h3_client.step);
 
     const exe_quic_server = App.add(b, "quic-server", "apps/quic_server.zig", target, optimize, need_libc, lib_mod);
@@ -140,7 +140,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe_quic_client);
     const run_quic_client = b.addRunArtifact(exe_quic_client);
     run_quic_client.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_quic_client.addArgs(args);
+    run_quic_client.addPassthruArgs();
     b.step("run-quic-client", "Run raw QUIC echo client").dependOn(&run_quic_client.step);
 
     const exe_wt_server = App.add(b, "wt-server", "apps/wt_server.zig", target, optimize, need_libc, lib_mod);
@@ -165,42 +165,42 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe_moq_relay);
     const run_moq_relay = b.addRunArtifact(exe_moq_relay);
     run_moq_relay.step.dependOn(b.getInstallStep());
-    if (b.args) |moq_args| run_moq_relay.addArgs(moq_args);
+    run_moq_relay.addPassthruArgs();
     b.step("run-moq-relay", "Run MoQ Transport relay").dependOn(&run_moq_relay.step);
 
     const exe_moq_server = App.add(b, "moq-server", "apps/moq_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_moq_server);
     const run_moq_server = b.addRunArtifact(exe_moq_server);
     run_moq_server.step.dependOn(b.getInstallStep());
-    if (b.args) |moq_args| run_moq_server.addArgs(moq_args);
+    run_moq_server.addPassthruArgs();
     b.step("run-moq-server", "Run MoQ Transport server (raw QUIC)").dependOn(&run_moq_server.step);
 
     const exe_moq_client = App.add(b, "moq-client", "apps/moq_client.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_moq_client);
     const run_moq_client = b.addRunArtifact(exe_moq_client);
     run_moq_client.step.dependOn(b.getInstallStep());
-    if (b.args) |moq_args| run_moq_client.addArgs(moq_args);
+    run_moq_client.addPassthruArgs();
     b.step("run-moq-client", "Run MoQ Transport client (raw QUIC)").dependOn(&run_moq_client.step);
 
     const exe_moq_browser = App.add(b, "moq-browser-server", "apps/moq_browser_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_moq_browser);
     const run_moq_browser = b.addRunArtifact(exe_moq_browser);
     run_moq_browser.step.dependOn(b.getInstallStep());
-    if (b.args) |moq_args| run_moq_browser.addArgs(moq_args);
+    run_moq_browser.addPassthruArgs();
     b.step("run-moq-browser-server", "Run MoQ Transport browser demo server").dependOn(&run_moq_browser.step);
 
     const exe_wt_echo = App.add(b, "wt-echo-server", "apps/wt_echo_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_wt_echo);
     const run_wt_echo = b.addRunArtifact(exe_wt_echo);
     run_wt_echo.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_wt_echo.addArgs(args);
+    run_wt_echo.addPassthruArgs();
     b.step("run-wt-echo-server", "Run WebTransport echo server").dependOn(&run_wt_echo.step);
 
     const exe_wpt = App.add(b, "wpt-server", "apps/wpt_server.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_wpt);
     const run_wpt = b.addRunArtifact(exe_wpt);
     run_wpt.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_wpt.addArgs(args);
+    run_wpt.addPassthruArgs();
     b.step("run-wpt-server", "Run WPT WebTransport test server").dependOn(&run_wpt.step);
 
     const exe_interop_server = App.add(b, "interop-server", "apps/interop_server.zig", target, optimize, need_libc, lib_mod);
@@ -213,7 +213,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe_interop_client);
     const run_interop_client = b.addRunArtifact(exe_interop_client);
     run_interop_client.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_interop_client.addArgs(args);
+    run_interop_client.addPassthruArgs();
     b.step("run-interop-client", "Run interop runner client").dependOn(&run_interop_client.step);
 
     const exe_interop_wt_server = App.add(b, "interop-wt-server", "apps/interop_wt_server.zig", target, optimize, need_libc, lib_mod);
@@ -232,14 +232,14 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe_lb);
     const run_lb = b.addRunArtifact(exe_lb);
     run_lb.step.dependOn(b.getInstallStep());
-    if (b.args) |args_lb| run_lb.addArgs(args_lb);
+    run_lb.addPassthruArgs();
     b.step("run-quic-lb", "Run QUIC load balancer").dependOn(&run_lb.step);
 
     const exe_bench = App.add(b, "bench", "apps/bench.zig", target, optimize, need_libc, lib_mod);
     b.installArtifact(exe_bench);
     const run_bench = b.addRunArtifact(exe_bench);
     run_bench.step.dependOn(b.getInstallStep());
-    if (b.args) |args_b| run_bench.addArgs(args_b);
+    run_bench.addPassthruArgs();
     b.step("run-bench", "Run benchmark client").dependOn(&run_bench.step);
 
     // Codec microbench — pure CPU (parse/serialize loops), no sockets.
