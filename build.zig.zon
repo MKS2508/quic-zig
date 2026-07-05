@@ -3,8 +3,8 @@
     .version = "0.2.0",
     .dependencies = .{
         .libxev = .{
-            .url = "https://github.com/MKS2508/libxev/archive/99e0031543ad389a3ec2cbd24695fc065d405e23.tar.gz",
-            .hash = "libxev-0.0.0-86vtc3UUFACrTO9EO8cPwh8o1luUC03TKUWQ271U8gNe",
+            .url = "https://github.com/MKS2508/libxev/archive/7f067af19e76fc3522fc22eb2befdef82c7cc8dc.tar.gz",
+            .hash = "libxev-0.0.0-86vtc6gUFADXrA3PX99k2xjY0Nsyf6qx08pmEUOO4G6S",
         },
     },
     .fingerprint = 0xc079525234abfc4c,
