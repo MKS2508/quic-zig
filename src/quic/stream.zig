@@ -1851,7 +1851,7 @@ test "SendStream: retransmit queue overflow coalesces ranges" {
 
     // Write enough data to cover all ranges
     const data: [2048]u8 = @splat('x');
-    try ss.writeData(data);
+    try ss.writeData(&data);
     // Simulate having sent all data
     ss.send_offset = 2048;
 
@@ -1882,7 +1882,7 @@ test "SendStream: contiguous ACK advances send offset after retransmit" {
     defer ss.deinit();
 
     const data: [100]u8 = @splat('x');
-    try ss.writeData(data);
+    try ss.writeData(&data);
     ss.send_offset = 20;
 
     ss.queueRetransmit(20, 80, false);
@@ -1904,7 +1904,7 @@ test "SendStream: ACK progress trims stale retransmit ranges" {
     defer ss.deinit();
 
     const data: [100]u8 = @splat('x');
-    try ss.writeData(data);
+    try ss.writeData(&data);
     ss.send_offset = 100;
     ss.queueRetransmit(0, 80, false);
 

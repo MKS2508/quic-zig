@@ -1518,7 +1518,7 @@ test "DynamicTable: insert entry larger than capacity fails" {
     const big_name: [40]u8 = @splat('x');
     try testing.expectError(
         error.EntryTooLarge,
-        dt.insert(big_name, "value"),
+        dt.insert(&big_name, "value"),
     );
 }
 
@@ -1528,9 +1528,9 @@ test "DynamicTable: insert rejects over-long name/value" {
 
     // name > 128 bytes
     const huge_name: [200]u8 = @splat('x');
-    try testing.expectError(error.NameTooLong, dt.insert(huge_name, "v"));
+    try testing.expectError(error.NameTooLong, dt.insert(&huge_name, "v"));
 
     // value > 512 bytes
     const huge_value: [600]u8 = @splat('v');
-    try testing.expectError(error.ValueTooLong, dt.insert("name", huge_value));
+    try testing.expectError(error.ValueTooLong, dt.insert("name", &huge_value));
 }

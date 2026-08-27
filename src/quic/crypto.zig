@@ -1025,7 +1025,8 @@ test "encodePacketNumber" {
 }
 
 test "hkdfExpandLabel" {
-    const early_secret = HkdfSha256.extract(&.{}, &@splat(@as(u8, 0)));
+    const zero_ikm: [32]u8 = @splat(0);
+    const early_secret = HkdfSha256.extract(&.{}, &zero_ikm);
     var empty_hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash("", &empty_hash, .{});
     const derived_secret = hkdfExpandLabel(early_secret, "derived", &empty_hash, 32);
