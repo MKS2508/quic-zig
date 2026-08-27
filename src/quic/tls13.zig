@@ -111,7 +111,11 @@ fn verifyRsaPss(
     switch (pk_components.modulus.len) {
         inline 128, 256, 384, 512 => |modulus_len| {
             if (sig_bytes.len != modulus_len) return error.BadCertificateVerify;
-            rsa.PSSSignature.verify(modulus_len, sig_bytes[0..modulus_len], signed_content, public_key, Hash) catch return error.BadCertificateVerify;
+            // concatVerify, no verify: en 0.17.0-dev.1884 el wrapper `verify` de std
+            // declara `sig` por valor y se lo pasa a `concatVerify`, que exige puntero
+            // (Certificate.zig:1030 → :1040) — es incallable. `verify` no hace otra cosa
+            // que este mismo concatVerify con un solo mensaje.
+            rsa.PSSSignature.concatVerify(modulus_len, sig_bytes[0..modulus_len], &.{signed_content}, public_key, Hash) catch return error.BadCertificateVerify;
         },
         else => return error.BadCertificateVerify,
     }
