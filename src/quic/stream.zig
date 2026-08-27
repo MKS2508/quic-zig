@@ -2215,7 +2215,8 @@ test "collectClosedStreams defers disposal when hasUnackedData" {
     sm.setMaxStreams(10, 10);
 
     const s = try sm.openBidiStream();
-    try s.send.writeData("x" ** 1000);
+    const payload: [1000]u8 = @splat('x');
+    try s.send.writeData(&payload);
     s.send.send_offset = 1000; // all data "sent"
     s.send.fin_sent = true;
     s.recv.fin_received = true;
@@ -2240,7 +2241,8 @@ test "disposal guard: closed_for_gc + fully-acked -> disposed" {
     sm.setMaxStreams(10, 10);
 
     const s = try sm.openBidiStream();
-    try s.send.writeData("x" ** 100);
+    const payload: [100]u8 = @splat('x');
+    try s.send.writeData(&payload);
     s.send.send_offset = 100;
     s.send.fin_sent = true;
     s.recv.fin_received = true;

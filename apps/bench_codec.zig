@@ -98,7 +98,8 @@ pub fn main(_: std.process.Init.Minimal) !void {
         try packet.writeVarInt(&fbs, 4);
         try packet.writeVarInt(&fbs, 100);
         try packet.writeVarInt(&fbs, 16);
-        try fbs.writeAll(&@splat(@as(u8, 0)));
+        const payload: [16]u8 = @splat(0);
+        try fbs.writeAll(&payload);
         break :blk fbs.seek;
     };
     {
@@ -169,7 +170,8 @@ pub fn main(_: std.process.Init.Minimal) !void {
         var fbs = io_compat.fixedBufferStream(&h3_buf);
         try packet.writeVarInt(&fbs, 0); // DATA
         try packet.writeVarInt(&fbs, 16);
-        try fbs.writeAll(&@splat(@as(u8, 0)));
+        const payload: [16]u8 = @splat(0);
+        try fbs.writeAll(&payload);
         break :blk fbs.seek;
     };
     {
