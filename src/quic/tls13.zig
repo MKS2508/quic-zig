@@ -111,7 +111,7 @@ fn verifyRsaPss(
     switch (pk_components.modulus.len) {
         inline 128, 256, 384, 512 => |modulus_len| {
             if (sig_bytes.len != modulus_len) return error.BadCertificateVerify;
-            rsa.PSSSignature.verify(modulus_len, sig_bytes[0..modulus_len].*, signed_content, public_key, Hash) catch return error.BadCertificateVerify;
+            rsa.PSSSignature.verify(modulus_len, sig_bytes[0..modulus_len], signed_content, public_key, Hash) catch return error.BadCertificateVerify;
         },
         else => return error.BadCertificateVerify,
     }
