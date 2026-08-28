@@ -5,3 +5,4 @@ zig-out
 .vscode
 interop/quiche/target
 fuzz/corpus
+zig-pkg
