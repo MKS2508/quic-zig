@@ -1,5 +1,19 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Step = std.Build.Step;
+
+// `minimum_zig_version` in build.zig.zon is advisory — the build runner never
+// checks it (a manifest declaring "0.99.0" builds fine on any toolchain). This
+// block is the only thing that actually stops a build on the wrong compiler.
+comptime {
+    const required = std.SemanticVersion.parse("0.17.0-dev.1893+78e3b1c73") catch unreachable;
+    if (builtin.zig_version.order(required) == .lt) {
+        @compileError(
+            "libxev requires Zig >= 0.17.0-dev.1893+78e3b1c73, found " ++
+                builtin.zig_version_string,
+        );
+    }
+}
 
 /// A note on my build.zig style: I try to create all the artifacts first,
 /// unattached to any steps. At the end of the build() function, I create
