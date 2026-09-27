@@ -2,11 +2,11 @@
     .name = .quic,
     .version = "0.5.0",
     .dependencies = .{
-        // endel/libxev tag quic-zig-2026-09-26-2: upstream plus the PRs in its
-        // fork/patches. See "libxev" in CLAUDE.md before changing this.
+        // MKS2508/libxev branch = MKS 0.17 port (c1e223b) + endel's quic-zig-2026-09-26-2
+        // patches (#224 #240 #245 #246 #247) + 0.17 test fixes. See "libxev" in CLAUDE.md.
         .libxev = .{
-            .url = "https://github.com/endel/libxev/archive/9d7f95fc3ec34ce0a5903127a6c2f3237c1d52d3.tar.gz",
-            .hash = "libxev-0.0.0-86vtc8zOFAACkm8W3tZUE9sSCSFDl7whPNXjgBdq5Ux0",
+            .url = "https://github.com/MKS2508/libxev/archive/f5d38116e122d46264b22bf9f31246280c6ce1e0.tar.gz",
+            .hash = "libxev-0.0.0-86vtc161FACqYeIlWiSoja8g74RJxfzAu0yFD1uaUDsr",
         },
     },
     .fingerprint = 0xc079525234abfc4c,
