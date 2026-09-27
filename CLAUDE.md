@@ -20,6 +20,17 @@
 - Final step: The WebTransport Protocol Framework (https://www.ietf.org/archive/id/draft-ietf-webtrans-overview-11.txt)
 
 
+## Fork note (MKS2508/quic-zig)
+
+This branch is `endel/quic-zig` main plus a thin Zig 0.17-dev layer, and nothing
+else: one mechanical compat commit, `PSSSignature.concatVerify` in tls13/rsa
+(std 0.17-dev `verify` is uncallable), the comptime guard in `build.zig`, this CI
+pin, and a libxev pin to a MKS2508/libxev branch = endel's quic-zig tag + 0.17
+port. The toolchain is `0.17.0-dev.1893+78e3b1c73`; where the text below says
+0.16, read "upstream's baseline". To update: rebase onto endel main and re-run
+the mechanical port. setup-zig mirrors purge old nightlies, so CI can break by
+itself over time.
+
 ## Checking the Zig stdlib
 
 This repo targets Zig 0.16 (`minimum_zig_version` in `build.zig.zon`). Never
