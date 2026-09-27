@@ -229,7 +229,7 @@ pub fn parseHeader(buf: []const u8, max_payload: usize) Error!?Header {
 pub fn unmask(data: []u8, key: [4]u8) void {
     const lanes = 16;
     const V = @Vector(lanes, u8);
-    const pattern: V = @bitCast(key ** (lanes / 4));
+    const pattern: V = @bitCast(key ++ key ++ key ++ key);
     var i: usize = 0;
     while (i + lanes <= data.len) : (i += lanes) {
         const chunk: V = data[i..][0..lanes].*;
@@ -588,7 +588,7 @@ test "frame errors" {
     // Fragmented ping.
     try testing.expectError(error.ProtocolError, parseFrame(clientFrame(&buf, .ping, false, "x"), 100));
     // Control frame over 125 bytes.
-    try testing.expectError(error.ProtocolError, parseFrame(clientFrame(&buf, .ping, true, &([_]u8{0} ** 126)), 1000));
+    try testing.expectError(error.ProtocolError, parseFrame(clientFrame(&buf, .ping, true, &(@as([126]u8, @splat(0)))), 1000));
     // 64-bit length with the top bit set.
     var huge = [_]u8{ 0x82, 0xff, 0x80, 0, 0, 0, 0, 0, 0, 0 };
     try testing.expectError(error.ProtocolError, parseFrame(&huge, 100));
@@ -771,7 +771,7 @@ test "close frames" {
 
 test "close payload cuts the reason at a code point" {
     var p: [125]u8 = undefined;
-    const reason = "a" ** 122 ++ "é"; // 124 bytes; "é" straddles the 123-byte limit
+    const reason = &@as([122]u8, @splat('a')) ++ "é"; // 124 bytes; "é" straddles the 123-byte limit
     const out = closePayload(&p, 1000, reason);
     try testing.expectEqual(@as(usize, 2 + 122), out.len);
     try testing.expect(std.unicode.utf8ValidateSlice(out[2..]));

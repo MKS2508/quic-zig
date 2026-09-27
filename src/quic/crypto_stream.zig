@@ -164,7 +164,7 @@ test "CryptoStream: the ceiling moves with what TLS has consumed" {
     var cs = CryptoStream.init(testing.allocator);
     defer cs.deinit();
 
-    const chunk = [_]u8{0} ** 4096;
+    const chunk = @as([4096]u8, @splat(0));
     const cap = limits.max_crypto_stream_offset;
     var off: u64 = 0;
     while (off < cap) : (off += chunk.len) try cs.handleCryptoFrame(off, &chunk);

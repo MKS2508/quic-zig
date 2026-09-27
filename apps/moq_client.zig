@@ -64,7 +64,7 @@ const MoqClientHandler = struct {
     group_id: u64 = 0,
     last_tick_ns: i128 = 0,
 
-    stream_roles: [256]StreamRole = [_]StreamRole{.unknown} ** 256,
+    stream_roles: [256]StreamRole = @as([256]StreamRole, @splat(.unknown)),
 
     fn setRole(self: *MoqClientHandler, sid: u64, role: StreamRole) void {
         if (sid < 256) self.stream_roles[@intCast(sid)] = role;
