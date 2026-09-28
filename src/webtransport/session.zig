@@ -1436,11 +1436,23 @@ pub const WebTransportConnection = struct {
     }
 
     /// Poll H3 events and translate to WT events.
+    ///
+    /// Several H3 events are handled here and have nothing to report (the
+    /// peer's SETTINGS, a drained body, a FIN on an active CONNECT stream...).
+    /// They must not end the poll: callers drain poll() until null and read
+    /// null as "nothing left", so an H3 event queued behind a handled one —
+    /// the 200 behind the SETTINGS of the same flight — would wait for an
+    /// unrelated wakeup. Keep going until H3 itself has nothing.
     fn pollH3Events(self: *WebTransportConnection) !?WtEvent {
-        const event = try self.h3.poll();
-        if (event == null) return null;
+        while (try self.h3.poll()) |event| {
+            if (try self.translateH3Event(event)) |wt_event| return wt_event;
+        }
+        return null;
+    }
 
-        switch (event.?) {
+    /// One H3 event as a WT event, or null when it was handled here.
+    fn translateH3Event(self: *WebTransportConnection, event: h3_conn.H3Event) !?WtEvent {
+        switch (event) {
             .connect_request => |req| {
                 if (isWebTransportProtocol(req.protocol)) {
                     // Register as a connecting session
@@ -2226,6 +2238,77 @@ test "WT integration: client receives session_ready on 200 response" {
 
     const session = setup.wt.getSession(session_id).?;
     try testing.expectEqual(SessionState.active, session.state);
+}
+
+/// What the event loops do each pass: poll until null, which they read as
+/// "nothing left to report". Returns the events seen, in order.
+fn drainLikeEventLoop(wt: *WebTransportConnection, seen: []std.meta.Tag(WtEvent)) !usize {
+    var n: usize = 0;
+    while (try wt.poll()) |ev| {
+        if (ev == .stream_data and ev.stream_data.data.len > 0) testing.allocator.free(ev.stream_data.data);
+        if (n == seen.len) return error.TooManyEvents;
+        seen[n] = std.meta.activeTag(ev);
+        n += 1;
+    }
+    return n;
+}
+
+test "WT integration: the 200 is reported in the pass that also takes the peer's SETTINGS" {
+    // On the wire the server's control stream (SETTINGS) and the 200 often
+    // land in the same flight. The loop drains poll() until null; a null that
+    // only means "swallowed the SETTINGS" leaves the 200 unread until some
+    // later packet wakes the loop, which may be none at all.
+    var quic_conn = createTestQuicConn(false);
+    defer quic_conn.deinit();
+    var h3 = h3_conn.H3Connection.init(testing.allocator, &quic_conn, false);
+    defer h3.deinit();
+    h3.local_settings.enable_connect_protocol = true;
+    h3.local_settings.enable_webtransport = true;
+    try h3.initConnection();
+    var wt = WebTransportConnection.init(testing.allocator, &h3, &quic_conn, false);
+    defer wt.deinit();
+
+    const session_id = try wt.connect("example.com", "/wt");
+
+    var ctrl: [128]u8 = undefined;
+    const ctrl_len = buildWtControlPayload(&ctrl);
+    const rs = try quic_conn.streams.getOrCreateRecvStream(3);
+    try rs.handleStreamFrame(0, ctrl[0..ctrl_len], false);
+    var resp: [256]u8 = undefined;
+    const resp_len = buildConnectResponse(&resp);
+    const stream = quic_conn.streams.getStream(session_id).?;
+    try stream.recv.handleStreamFrame(stream.recv.sorter.highestReceived(), resp[0..resp_len], false);
+
+    var seen: [8]std.meta.Tag(WtEvent) = undefined;
+    const n = try drainLikeEventLoop(&wt, &seen);
+    try testing.expect(std.mem.indexOfScalar(std.meta.Tag(WtEvent), seen[0..n], .session_ready) != null);
+    try testing.expectEqual(SessionState.active, wt.getSession(session_id).?.state);
+}
+
+test "WT integration: the CONNECT is reported in the pass that also takes the peer's SETTINGS" {
+    var quic_conn = createTestQuicConn(true);
+    defer quic_conn.deinit();
+    var h3 = h3_conn.H3Connection.init(testing.allocator, &quic_conn, true);
+    defer h3.deinit();
+    h3.local_settings.enable_connect_protocol = true;
+    h3.local_settings.enable_webtransport = true;
+    h3.local_settings.h3_datagram = true;
+    try h3.initConnection();
+    var wt = WebTransportConnection.init(testing.allocator, &h3, &quic_conn, true);
+    defer wt.deinit();
+
+    var ctrl: [128]u8 = undefined;
+    const ctrl_len = buildWtControlPayload(&ctrl);
+    const rs = try quic_conn.streams.getOrCreateRecvStream(2);
+    try rs.handleStreamFrame(0, ctrl[0..ctrl_len], false);
+    var req: [512]u8 = undefined;
+    const req_len = buildConnectRequest(&req, "/wt");
+    const stream = try quic_conn.streams.getOrCreateStream(0);
+    try stream.recv.handleStreamFrame(0, req[0..req_len], false);
+
+    var seen: [8]std.meta.Tag(WtEvent) = undefined;
+    const n = try drainLikeEventLoop(&wt, &seen);
+    try testing.expect(std.mem.indexOfScalar(std.meta.Tag(WtEvent), seen[0..n], .connect_request) != null);
 }
 
 test "WT integration: a close arriving with the 200 is not lost" {
