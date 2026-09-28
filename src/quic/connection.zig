@@ -622,6 +622,10 @@ pub const Connection = struct {
     ack_result: ack_handler.AckResult = .{},
     cc: congestion.Cubic = congestion.Cubic.init(),
     pacer: congestion.Pacer = congestion.Pacer.init(),
+    /// When the pacer last turned a packet away, the time it lets the next
+    /// one go. Cleared by a send pass that gets past the pacer, or once
+    /// `onTimeout` sees it pass.
+    pacing_deadline: ?i64 = null,
     conn_flow_ctrl: flow_control.ConnectionFlowController = undefined,
     streams: stream_mod.StreamsMap = undefined,
     crypto_streams: crypto_stream.CryptoStreamManager = undefined,
@@ -3235,9 +3239,11 @@ pub const Connection = struct {
         if (self.pto_probe_pending == 0) {
             const pacer_delay = self.pacer.timeUntilSend(now);
             if (pacer_delay > 0) {
+                self.pacing_deadline = now + pacer_delay;
                 return 0;
             }
         }
+        self.pacing_deadline = null;
 
         // Queue flow control updates before packing
         self.queueFlowControlUpdates();
@@ -3505,6 +3511,11 @@ pub const Connection = struct {
                 }
             }
             return;
+        }
+
+        // The pacer's wait is over; the send pass that follows asks it again.
+        if (self.pacing_deadline) |deadline| {
+            if (now >= deadline) self.pacing_deadline = null;
         }
 
         // Check idle timeout (RFC 9000 §10.1, §10.1.2)
@@ -4166,16 +4177,13 @@ pub const Connection = struct {
             }
         }
 
-        // Pacer: if the pacer has bandwidth set (active transfer), include its
-        // next-send time so the event loop wakes up promptly to send more data.
-        if (self.pacer.bandwidth_shifted > 0 and self.state == .connected) {
-            const now: i64 = @intCast(sys.nanoTimestamp());
-            const delay = self.pacer.delayAt(now);
-            if (delay > 0) {
-                const pacer_deadline = now + delay;
-                if (earliest == null or pacer_deadline < earliest.?) {
-                    earliest = pacer_deadline;
-                }
+        // Pacer: a packet it turned away goes out at the deadline recorded
+        // then. Recomputing the delay here would drop a wait that ended
+        // between the send pass and this call, and leave the data for the
+        // next unrelated timer.
+        if (self.pacing_deadline) |deadline| {
+            if (earliest == null or deadline < earliest.?) {
+                earliest = deadline;
             }
         }
 
@@ -6235,6 +6243,33 @@ test "a handshake-space PTO with nothing to resend still probes" {
     const f = conn.pending_frames.pop();
     try std.testing.expect(f != null);
     try std.testing.expect(f.? == .ping);
+}
+
+test "a send the pacer turns away keeps its wakeup once the wait is over" {
+    var conn = testConnection(std.testing.allocator);
+    defer conn.deinit();
+
+    const t0: i64 = @intCast(sys.nanoTimestamp());
+    conn.state = .connected;
+    conn.handshake_confirmed = true;
+    conn.last_packet_received_time = t0;
+    conn.pkt_handler.rtt_stats.updateRtt(std.time.ns_per_ms, 0, true);
+    conn.pacer.setBandwidth(conn.cc.sendWindow(), &conn.pkt_handler.rtt_stats);
+    while (conn.pacer.budget >= conn.pacer.max_datagram_size) conn.pacer.onPacketSent(1200, t0);
+
+    var buf: [1500]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try conn.send(&buf));
+
+    // The loop arms its timer only after the send pass. If the wait is over
+    // by then, the wakeup must still be due now, not at the idle timeout.
+    while (conn.pacer.delayAt(@intCast(sys.nanoTimestamp())) > 0) {}
+    const next = conn.nextTimeoutNs() orelse return error.NoWakeup;
+    try std.testing.expect(next <= @as(i64, @intCast(sys.nanoTimestamp())));
+
+    // Once the timer has fired the deadline is spent.
+    try conn.onTimeout();
+    const after = conn.nextTimeoutNs() orelse return error.NoWakeup;
+    try std.testing.expect(after > @as(i64, @intCast(sys.nanoTimestamp())));
 }
 
 test "an ACK for a packet number never sent is a PROTOCOL_VIOLATION" {
