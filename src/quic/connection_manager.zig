@@ -227,6 +227,32 @@ pub const ReplyLimits = struct {
     }
 };
 
+/// What identifies a source for `max_connections_per_address`: family tag
+/// then the IPv4 address, or the first 64 bits of the IPv6 address (an
+/// IPv4-mapped one as its IPv4 address). Null for any other family.
+fn sourceKey(addr: *const posix.sockaddr.storage) ?[9]u8 {
+    var key: [9]u8 = @splat(0);
+    if (addr.family == posix.AF.INET) {
+        const in: *const posix.sockaddr.in = @ptrCast(@alignCast(addr));
+        key[0] = 4;
+        @memcpy(key[1..5], std.mem.asBytes(&in.addr));
+        return key;
+    }
+    if (addr.family == posix.AF.INET6) {
+        const in6: *const posix.sockaddr.in6 = @ptrCast(@alignCast(addr));
+        const mapped_prefix = [12]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+        if (std.mem.eql(u8, in6.addr[0..12], &mapped_prefix)) {
+            key[0] = 4;
+            @memcpy(key[1..5], in6.addr[12..16]);
+            return key;
+        }
+        key[0] = 6;
+        @memcpy(key[1..9], in6.addr[0..8]);
+        return key;
+    }
+    return null;
+}
+
 /// Manages multiple QUIC connections, routing packets by DCID.
 pub const ConnectionManager = struct {
     pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
@@ -235,6 +261,16 @@ pub const ConnectionManager = struct {
 
     /// New connections past this many live ones are refused.
     max_connections: usize = DEFAULT_MAX_CONNECTIONS,
+
+    /// New connections from a source that already has this many live ones
+    /// are refused, so one host cannot take the whole table. A source is an
+    /// IPv4 address, or an IPv6 /64 (one subscriber's prefix); an
+    /// IPv4-mapped IPv6 address counts as its IPv4 address. Null: no cap.
+    /// Counts connections whose address is not validated yet: pair it with
+    /// `retry_threshold`, so a loaded server keeps state only for clients
+    /// that proved their address and a spoofed source cannot spend another
+    /// host's share.
+    max_connections_per_address: ?usize = null,
     next_entry_id: u64 = 1,
     cid_map: std.HashMap(CidKey, *ConnEntry, CidKeyContext, 80),
     entries: std.ArrayList(*ConnEntry),
@@ -628,6 +664,9 @@ pub const ConnectionManager = struct {
                 if (self.refuse_new or self.entries.items.len >= self.max_connections) {
                     return self.refuse(header, out_buf);
                 }
+                if (self.max_connections_per_address) |cap| {
+                    if (self.connectionsFrom(&from) >= cap) return self.refuse(header, out_buf);
+                }
 
                 // A token is honoured whether or not Retry is required now:
                 // load may have dropped since we sent the Retry, and its
@@ -706,6 +745,18 @@ pub const ConnectionManager = struct {
         if (!quic_lb.extractServerId(lb, dcid, &self.foreign_id)) return null;
         if (std.mem.eql(u8, self.foreign_id[0..n], lb.server_id[0..n])) return null;
         return self.foreign_id[0..n];
+    }
+
+    /// Live connections whose peer is `addr`'s source (see
+    /// `max_connections_per_address`).
+    pub fn connectionsFrom(self: *const ConnectionManager, addr: *const posix.sockaddr.storage) usize {
+        const key = sourceKey(addr) orelse return 0;
+        var n: usize = 0;
+        for (self.entries.items) |e| {
+            const k = sourceKey(e.conn.peerAddress()) orelse continue;
+            n += @intFromBool(std.mem.eql(u8, &k, &key));
+        }
+        return n;
     }
 
     /// Answer an Initial we will not serve with CONNECTION_REFUSED (RFC 9000
@@ -1179,4 +1230,78 @@ test "past retry_threshold a new client gets Retry, and is served once it echoes
     try std.testing.expect(mgr.recvDatagram(buf[0..n], addr, addr, 0, &out) == .processed);
     try std.testing.expectEqual(@as(usize, 1), mgr.connectionCount());
     try std.testing.expect(mgr.entries.items[0].conn.paths[0].is_validated);
+}
+
+fn v4(a: [4]u8, port: u16) posix.sockaddr.storage {
+    var st = std.mem.zeroes(posix.sockaddr.storage);
+    const in: *posix.sockaddr.in = @ptrCast(@alignCast(&st));
+    in.* = .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.bytesToValue(u32, &a) };
+    return st;
+}
+
+fn v6(a: [16]u8, port: u16) posix.sockaddr.storage {
+    var st = std.mem.zeroes(posix.sockaddr.storage);
+    const in6: *posix.sockaddr.in6 = @ptrCast(@alignCast(&st));
+    in6.* = .{ .port = std.mem.nativeToBig(u16, port), .flowinfo = 0, .addr = a, .scope_id = 0 };
+    return st;
+}
+
+test "max_connections_per_address: one source past its cap is refused CONNECTION_REFUSED, another source is still served" {
+    const alloc = std.testing.allocator;
+    var mgr = testManager(alloc);
+    defer mgr.deinit();
+    mgr.max_connections_per_address = 2;
+    mgr.reply_limits = .init(100);
+    const local = std.mem.zeroes(posix.sockaddr.storage);
+    var out: [1500]u8 = undefined;
+    var buf: [1500]u8 = undefined;
+
+    const Case = struct { from: posix.sockaddr.storage, served: bool };
+    const cases = [_]Case{
+        .{ .from = v4(.{ 192, 0, 2, 7 }, 1000), .served = true },
+        .{ .from = v4(.{ 192, 0, 2, 7 }, 1001), .served = true },
+        // Third from the same IPv4 (another port): refused.
+        .{ .from = v4(.{ 192, 0, 2, 7 }, 1002), .served = false },
+        // The same address, IPv4-mapped: still that host.
+        .{ .from = v6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 7 }, 1003), .served = false },
+        // Another host.
+        .{ .from = v4(.{ 192, 0, 2, 8 }, 1000), .served = true },
+        // One IPv6 /64 counts as one source.
+        .{ .from = v6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1 }, 1000), .served = true },
+        .{ .from = v6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0xaa, 0, 0, 0, 0, 0, 0, 2 }, 1000), .served = true },
+        .{ .from = v6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0xbb, 0, 0, 0, 0, 0, 0, 3 }, 1000), .served = false },
+        .{ .from = v6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1 }, 1000), .served = true },
+    };
+    var served: usize = 0;
+    for (cases) |c| {
+        const ini = try clientInitial(alloc, &buf);
+        defer {
+            ini.conn.deinit();
+            alloc.destroy(ini.conn);
+        }
+        const before = mgr.connectionCount();
+        const action = mgr.recvDatagram(buf[0..ini.len], c.from, local, 0, &out);
+        if (c.served) {
+            try std.testing.expect(action == .processed);
+            served += 1;
+        } else {
+            try std.testing.expect(action == .send_response);
+            try std.testing.expectEqual(before, mgr.connectionCount());
+        }
+    }
+    try std.testing.expectEqual(served, mgr.connectionCount());
+
+    // A connection of the capped host goes away: the host may connect again.
+    for (mgr.entries.items) |e| {
+        if (sourceKey(e.conn.peerAddress())) |k| if (k[0] == 4 and k[4] == 7) {
+            mgr.removeConnection(e);
+            break;
+        };
+    }
+    const again = try clientInitial(alloc, &buf);
+    defer {
+        again.conn.deinit();
+        alloc.destroy(again.conn);
+    }
+    try std.testing.expect(mgr.recvDatagram(buf[0..again.len], v4(.{ 192, 0, 2, 7 }, 2000), local, 0, &out) == .processed);
 }

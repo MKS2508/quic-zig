@@ -151,6 +151,11 @@ pub const Config = struct {
     /// CONNECTION_REFUSED.
     max_connections: usize = connection_manager.ConnectionManager.DEFAULT_MAX_CONNECTIONS,
 
+    /// Live connections one source (IPv4 address, IPv6 /64) may hold; one
+    /// more is refused with CONNECTION_REFUSED. Null: no cap. See
+    /// `ConnectionManager.max_connections_per_address`.
+    max_connections_per_address: ?usize = null,
+
     /// Server-wide cap, per second, on each kind of reply sent without
     /// connection state: Version Negotiation, stateless reset and
     /// CONNECTION_REFUSED, budgeted separately. Each is triggerable with a
@@ -880,6 +885,7 @@ pub fn Server(comptime Handler: type) type {
             conn_mgr.require_retry = config.require_retry;
             conn_mgr.retry_threshold = config.retry_threshold;
             conn_mgr.max_connections = config.max_connections;
+            conn_mgr.max_connections_per_address = config.max_connections_per_address;
             conn_mgr.reply_limits = .init(config.stateless_reply_rate);
             conn_mgr.steer_foreign = config.foreign_datagram != null;
 
