@@ -890,6 +890,21 @@ pub const WebTransportConnection = struct {
         return null;
     }
 
+    /// A CONNECT with no session slot left (MAX_SESSIONS): H3_REQUEST_REJECTED
+    /// in both directions (RFC 9114 §4.1.1, nothing was processed). HTTP/3
+    /// is done with the stream — it parses nothing more on it and reports no
+    /// cancel of it — and drops what it buffered past the HEADERS; the rest
+    /// goes with the stream when QUIC reclaims it.
+    fn refuseConnect(self: *WebTransportConnection, stream_id: u64) !void {
+        self.h3.rejectRequest(stream_id);
+        try self.h3.finished_streams.put(stream_id, {});
+        try self.h3.cancelled_streams.put(self.allocator, stream_id, {});
+        if (self.h3.stream_bufs.fetchRemove(stream_id)) |kv| {
+            var buf = kv.value;
+            buf.deinit(self.allocator);
+        }
+    }
+
     /// Take over what HTTP/3 read past the CONNECT's HEADERS: capsules that
     /// came in the same read — a close sent right after the 200, say — would
     /// otherwise sit in its buffer, which it no longer looks at.
@@ -1455,8 +1470,14 @@ pub const WebTransportConnection = struct {
         switch (event) {
             .connect_request => |req| {
                 if (isWebTransportProtocol(req.protocol)) {
-                    // Register as a connecting session
-                    _ = self.allocateSession(req.stream_id, .connecting);
+                    // Register as a connecting session. With every slot taken
+                    // there is no session to report: the CONNECT is refused
+                    // here, uncounted, so no layer above builds state for a
+                    // session this connection cannot hold.
+                    if (self.allocateSession(req.stream_id, .connecting) == null) {
+                        try self.refuseConnect(req.stream_id);
+                        return null;
+                    }
                     self.active_session_count += 1;
                     // Exclude this stream from H3 bidi processing
                     try self.h3.excluded_streams.put(req.stream_id, {});
@@ -2208,6 +2229,55 @@ test "WT integration: server receives connect_request from H3" {
         },
         else => return error.UnexpectedEvent,
     }
+}
+
+test "WT integration: a CONNECT past the session slots is refused, not counted and not reported" {
+    var quic_conn = createTestQuicConn(true);
+    defer quic_conn.deinit();
+    var h3 = h3_conn.H3Connection.init(testing.allocator, &quic_conn, true);
+    defer h3.deinit();
+    h3.local_settings.enable_connect_protocol = true;
+    try h3.initConnection();
+    try injectPeerControlStream(&quic_conn, &h3, true);
+    var wt = WebTransportConnection.init(testing.allocator, &h3, &quic_conn, true);
+    defer wt.deinit();
+
+    var req_buf: [512]u8 = undefined;
+    const req_len = buildConnectRequest(&req_buf, "/wt");
+    // One CONNECT per slot, each reported.
+    var k: u64 = 0;
+    while (k < MAX_SESSIONS) : (k += 1) {
+        const stream = try quic_conn.streams.getOrCreateStream(4 * k);
+        try stream.recv.handleStreamFrame(0, req_buf[0..req_len], false);
+        const ev = (try wt.poll()) orelse return error.NoEvent;
+        try testing.expectEqual(4 * k, ev.connect_request.session_id);
+    }
+    try testing.expectEqual(@as(u32, MAX_SESSIONS), wt.active_session_count);
+
+    // The slots are full: the next CONNECTs reach nobody, take no slot and
+    // are rejected with H3_REQUEST_REJECTED in both directions.
+    var extra: u64 = 0;
+    while (extra < 3) : (extra += 1) {
+        const id = 4 * (MAX_SESSIONS + extra);
+        const stream = try quic_conn.streams.getOrCreateStream(id);
+        try stream.recv.handleStreamFrame(0, req_buf[0..req_len], false);
+        try testing.expectEqual(@as(?WtEvent, null), try wt.poll());
+        try testing.expectEqual(@as(u32, MAX_SESSIONS), wt.active_session_count);
+        try testing.expect(wt.getSession(id) == null);
+        const rejected: u64 = @intFromEnum(h3_conn.H3Error.request_rejected);
+        try testing.expectEqual(@as(?u64, rejected), stream.recv.stop_sending_err);
+        try testing.expect(stream.send.reset_err != null);
+        try testing.expectEqual(rejected, stream.send.reset_err.?);
+    }
+
+    // A slot freed is a slot a new CONNECT can take.
+    wt.finalizeSession(wt.getSession(0).?);
+    const id = 4 * (MAX_SESSIONS + extra);
+    const stream = try quic_conn.streams.getOrCreateStream(id);
+    try stream.recv.handleStreamFrame(0, req_buf[0..req_len], false);
+    const ev = (try wt.poll()) orelse return error.NoEvent;
+    try testing.expectEqual(id, ev.connect_request.session_id);
+    try testing.expectEqual(@as(u32, MAX_SESSIONS), wt.active_session_count);
 }
 
 test "WT integration: webtransport-h3 opens a session too" {
