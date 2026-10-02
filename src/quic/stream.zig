@@ -19,7 +19,7 @@ pub const StreamType = enum(u2) {
 
 /// Returns the type of a stream from its ID.
 pub fn streamType(stream_id: u64) StreamType {
-    return @enumFromInt(@as(u2, @truncate(stream_id)));
+    return @fromBackingInt(@intCast(@as(u2, @truncate(stream_id))));
 }
 
 /// Returns true if the stream is bidirectional.
@@ -100,7 +100,7 @@ pub const FrameSorter = struct {
     pub fn init(allocator: Allocator) FrameSorter {
         return .{
             .allocator = allocator,
-            .chunks = .{ .items = &.{}, .capacity = 0 },
+            .chunks = .empty,
         };
     }
 
@@ -697,7 +697,7 @@ pub const SendStream = struct {
         return .{
             .stream_id = stream_id,
             .allocator = allocator,
-            .write_buffer = .{ .items = &.{}, .capacity = 0 },
+            .write_buffer = .empty,
             .acked_ranges = ranges.RangeSet.init(allocator),
         };
     }
@@ -783,7 +783,7 @@ pub const SendStream = struct {
         const mem = self.allocator.alloc(u8, new_cap) catch return false;
         @memcpy(mem[0..live.len], live);
         self.write_buffer.deinit(self.allocator);
-        self.write_buffer = .{ .items = mem[0..live.len], .capacity = new_cap };
+        self.write_buffer = .{ .items = mem[0..live.len], .capacity = new_cap, .pointer_stability = .{} };
         self.buf_base += prefix;
         return true;
     }

@@ -1450,7 +1450,8 @@ test "an encoder-stream Duplicate copies an entry out of the arena it writes to"
     // Insert With Literal Name: 01H0NNNN, 5-bit name length, then a string.
     try dec.processEncoderInstruction(&[_]u8{
         0x40 | 4, 'n', 'a', 'm', 'e',
-        5,        'v', 'a', 'l', 'u', 'e',
+        5,        'v', 'a', 'l', 'u',
+        'e',
     });
     try testing.expectEqual(@as(usize, 1), dec.dynamic.count);
 

@@ -1197,7 +1197,7 @@ test "Retry: integrity tag compute and verify" {
     const pkt_writer = &pkt_fbs;
 
     // First byte: Retry packet type
-    try pkt_writer.writeByte(@intFromEnum(PacketType.retry));
+    try pkt_writer.writeByte(@backingInt(PacketType.retry));
     // Version
     try pkt_writer.writeInt(u32, 0x00000001, ENDIAN);
     // DCID

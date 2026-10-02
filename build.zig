@@ -5,10 +5,10 @@ const builtin = @import("builtin");
 // checks it (a manifest declaring "0.99.0" builds fine on any toolchain). This
 // block is the only thing that actually stops a build on the wrong compiler.
 comptime {
-    const required = std.SemanticVersion.parse("0.17.0-dev.1893+78e3b1c73") catch unreachable;
+    const required = std.SemanticVersion.parse("0.17.0") catch unreachable;
     if (builtin.zig_version.order(required) == .lt) {
         @compileError(
-            "quic-zig requires Zig >= 0.17.0-dev.1893+78e3b1c73, found " ++
+            "quic-zig requires Zig >= 0.17.0, found " ++
                 builtin.zig_version_string,
         );
     }

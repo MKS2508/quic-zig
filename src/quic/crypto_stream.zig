@@ -36,7 +36,7 @@ pub const CryptoStream = struct {
         return .{
             .allocator = allocator,
             .recv_sorter = FrameSorter.init(allocator),
-            .send_buffer = .{ .items = &.{}, .capacity = 0 },
+            .send_buffer = .empty,
         };
     }
 
@@ -131,10 +131,10 @@ pub const CryptoStreamManager = struct {
     /// EncryptionLevel enum: initial=0, early_data=1, handshake=2, application=3
     pub fn getStream(self: *CryptoStreamManager, level: u8) *CryptoStream {
         return switch (level) {
-            0 => &self.initial,       // initial
-            1 => &self.initial,       // early_data (not used, reuse initial)
-            2 => &self.handshake,     // handshake
-            3 => &self.one_rtt,       // application (1-RTT)
+            0 => &self.initial, // initial
+            1 => &self.initial, // early_data (not used, reuse initial)
+            2 => &self.handshake, // handshake
+            3 => &self.one_rtt, // application (1-RTT)
             else => unreachable,
         };
     }

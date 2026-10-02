@@ -22,14 +22,15 @@
 
 ## Fork note (MKS2508/quic-zig)
 
-This branch is `endel/quic-zig` main plus a thin Zig 0.17-dev layer, and nothing
+This branch is `endel/quic-zig` main plus a thin Zig 0.17 layer, and nothing
 else: one mechanical compat commit, `PSSSignature.concatVerify` in tls13/rsa
-(std 0.17-dev `verify` is uncallable), the comptime guard in `build.zig`, this CI
-pin, and a libxev pin to a MKS2508/libxev branch = endel's quic-zig tag + 0.17
-port. The toolchain is `0.17.0-dev.1893+78e3b1c73`; where the text below says
-0.16, read "upstream's baseline". To update: rebase onto endel main and re-run
-the mechanical port. setup-zig mirrors purge old nightlies, so CI can break by
-itself over time.
+(std 0.17 `verify` is uncallable), the 0.17.0-stable compat (`ArrayList.empty`
+now that the list carries `pointer_stability`, infallible X25519, the `zig fmt`
+rewrite of `@intFromEnum`/`@enumFromInt` to `@backingInt`/`@fromBackingInt`),
+the comptime guard in `build.zig`, this CI pin, and a libxev pin to MKS2508/libxev
+main = endel's quic-zig tag + 0.17 port. The toolchain is Zig `0.17.0` (stable);
+where the text below says 0.16, read "upstream's baseline". To update: rebase
+onto endel main and re-run the mechanical port.
 
 ## Checking the Zig stdlib
 

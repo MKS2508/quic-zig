@@ -27,7 +27,7 @@ pub const Opcode = enum(u4) {
     _,
 
     pub fn isControl(op: Opcode) bool {
-        return @intFromEnum(op) & 0x8 != 0;
+        return @backingInt(op) & 0x8 != 0;
     }
 };
 
@@ -182,7 +182,7 @@ pub fn parseHeader(buf: []const u8, max_payload: usize) Error!?Header {
     const b0 = buf[0];
     const b1 = buf[1];
     if (b0 & 0x70 != 0) return error.ProtocolError; // RSV1-3 without an extension
-    const opcode: Opcode = @enumFromInt(@as(u4, @truncate(b0)));
+    const opcode: Opcode = @fromBackingInt(@intCast(@as(u4, @truncate(b0))));
     switch (opcode) {
         .continuation, .text, .binary, .close, .ping, .pong => {},
         _ => return error.ProtocolError,
@@ -241,7 +241,7 @@ pub fn unmask(data: []u8, key: [4]u8) void {
 
 /// Writes the header of an unmasked server frame; returns its bytes.
 pub fn writeFrameHeader(buf: *[10]u8, opcode: Opcode, fin: bool, len: usize) []const u8 {
-    buf[0] = @as(u8, if (fin) 0x80 else 0) | @as(u8, @intFromEnum(opcode));
+    buf[0] = @as(u8, if (fin) 0x80 else 0) | @as(u8, @backingInt(opcode));
     if (len < 126) {
         buf[1] = @intCast(len);
         return buf[0..2];

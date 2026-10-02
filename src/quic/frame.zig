@@ -1383,12 +1383,12 @@ test "parse path_response frame" {
 }
 
 test "parse connection_close frame" {
-    var bytes = [_]u8{ 0x1c, 0x10, @intFromEnum(FrameType.max_data), 16, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112 };
+    var bytes = [_]u8{ 0x1c, 0x10, @backingInt(FrameType.max_data), 16, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112 };
 
     switch (try Frame.parse(&bytes)) {
         FrameType.connection_close => |connection_close| {
             try std.testing.expect(connection_close.error_code == 0x10);
-            try std.testing.expect(connection_close.frame_type == @intFromEnum(FrameType.max_data));
+            try std.testing.expect(connection_close.frame_type == @backingInt(FrameType.max_data));
             try std.testing.expectEqualStrings("abcdefghijklmnop", connection_close.reason);
         },
         else => unreachable,
