@@ -835,7 +835,7 @@ pub const H3Connection = struct {
                 self.peer_control_stream_id = stream_id;
                 // If there's remaining data, buffer it for SETTINGS parsing
                 if (remaining.len > 0) {
-                    var buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+                    var buf = std.ArrayList(u8).empty;
                     try buf.appendSlice(self.allocator, remaining);
                     try self.stream_bufs.put(stream_id, buf);
                 }

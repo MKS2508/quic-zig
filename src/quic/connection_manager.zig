@@ -330,7 +330,7 @@ pub const ConnectionManager = struct {
         return .{
             .allocator = allocator,
             .cid_map = std.HashMap(CidKey, *ConnEntry, CidKeyContext, 80).init(allocator),
-            .entries = .{ .items = &.{}, .capacity = 0 },
+            .entries = .empty,
             .reset_lookup_key = lookup_key,
             .tls_config = tls_config,
             .conn_config = cc,

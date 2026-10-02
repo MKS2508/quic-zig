@@ -36,7 +36,7 @@ pub const CryptoStream = struct {
         return .{
             .allocator = allocator,
             .recv_sorter = FrameSorter.init(allocator),
-            .send_buffer = .{ .items = &.{}, .capacity = 0 },
+            .send_buffer = .empty,
         };
     }
 

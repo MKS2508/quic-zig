@@ -924,7 +924,7 @@ pub const WebTransportConnection = struct {
     /// by the same disposal path.
     fn streamBuf(self: *WebTransportConnection, stream_id: u64) !*std.ArrayList(u8) {
         const gop = try self.stream_bufs.getOrPut(stream_id);
-        if (!gop.found_existing) gop.value_ptr.* = .{ .items = &.{}, .capacity = 0 };
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
         return gop.value_ptr;
     }
 
@@ -1212,7 +1212,7 @@ pub const WebTransportConnection = struct {
             } else {
                 // Not a WT stream — buffer for H3 to handle
                 var buf = self.h3.stream_bufs.getPtr(stream_id) orelse blk: {
-                    const new_buf = std.ArrayList(u8){ .items = &.{}, .capacity = 0 };
+                    const new_buf = std.ArrayList(u8).empty;
                     try self.h3.stream_bufs.put(stream_id, new_buf);
                     break :blk self.h3.stream_bufs.getPtr(stream_id).?;
                 };

@@ -979,7 +979,7 @@ fn keyExchange(share: KeyShare, shared: *[32]u8, public_buf: *[65]u8) Error![]co
             if (share.key.len != X25519.public_length) return error.IllegalParameter;
             var seed: [X25519.seed_length]u8 = undefined;
             sys.randomBytes(&seed);
-            const kp = X25519.KeyPair.generateDeterministic(seed) catch return error.InternalError;
+            const kp = X25519.KeyPair.generateDeterministic(seed);
             crypto.secureZero(u8, &seed);
             shared.* = X25519.scalarmult(kp.secret_key, share.key[0..32].*) catch return error.IllegalParameter;
             public_buf[0..32].* = kp.public_key;
@@ -1542,7 +1542,7 @@ const MiniClient = struct {
     fn generateKeys(c: *MiniClient) void {
         var seed: [32]u8 = undefined;
         sys.randomBytes(&seed);
-        c.x25519 = X25519.KeyPair.generateDeterministic(seed) catch unreachable;
+        c.x25519 = X25519.KeyPair.generateDeterministic(seed);
         sys.randomBytes(&seed);
         c.p256 = EcdsaP256Sha256.KeyPair.generateDeterministic(seed) catch unreachable;
     }

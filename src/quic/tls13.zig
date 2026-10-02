@@ -1358,11 +1358,7 @@ pub const Tls13Handshake = struct {
 
         // Generate X25519 key pair
         sys.randomBytes(&self.x25519_secret);
-        self.x25519_public = X25519.recoverPublicKey(self.x25519_secret) catch blk: {
-            // If key is bad (unlikely), regenerate
-            sys.randomBytes(&self.x25519_secret);
-            break :blk X25519.recoverPublicKey(self.x25519_secret) catch unreachable;
-        };
+        self.x25519_public = X25519.recoverPublicKey(self.x25519_secret);
 
         // Generate P-256 key pair (offered alongside X25519 in ClientHello)
         sys.randomBytes(&self.p256_secret);
@@ -1435,10 +1431,7 @@ pub const Tls13Handshake = struct {
 
         // Generate X25519 key pair
         sys.randomBytes(&self.x25519_secret);
-        self.x25519_public = X25519.recoverPublicKey(self.x25519_secret) catch blk: {
-            sys.randomBytes(&self.x25519_secret);
-            break :blk X25519.recoverPublicKey(self.x25519_secret) catch unreachable;
-        };
+        self.x25519_public = X25519.recoverPublicKey(self.x25519_secret);
         self.negotiated_group = .x25519;
     }
 

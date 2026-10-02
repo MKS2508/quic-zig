@@ -658,7 +658,7 @@ pub const Conn = struct {
         defer crypto.secureZero(u8, &seed);
         switch (self.group) {
             .x25519 => {
-                const kp = X25519.KeyPair.generateDeterministic(seed) catch return error.InternalError;
+                const kp = X25519.KeyPair.generateDeterministic(seed);
                 self.key_secret = kp.secret_key;
                 self.key_public[0..32].* = kp.public_key;
                 self.key_public_len = 32;
