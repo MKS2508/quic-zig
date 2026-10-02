@@ -610,7 +610,7 @@ pub const WebTransportConnection = struct {
         const stream = self.quic.streams.getStream(session_id) orelse return;
         var hdr_buf: [16]u8 = undefined;
         var hdr = io.fixedBufferStream(&hdr_buf);
-        packet.writeVarInt(&hdr, @intFromEnum(h3_frame.H3FrameType.data)) catch return;
+        packet.writeVarInt(&hdr, @backingInt(h3_frame.H3FrameType.data)) catch return;
         packet.writeVarInt(&hdr, capsule.len) catch return;
         stream.send.writeData(hdr.buffered()) catch return;
         stream.send.writeData(capsule) catch {};
@@ -953,7 +953,7 @@ pub const WebTransportConnection = struct {
 
             // A DATA frame is the RFC 9297 container, not a capsule: drop the
             // header and what follows is the capsule stream itself.
-            if (header.frame_type == @intFromEnum(h3_frame.H3FrameType.data)) {
+            if (header.frame_type == @backingInt(h3_frame.H3FrameType.data)) {
                 h3_frame.consumeFromBuf(buf, header.header_len);
                 continue;
             }
@@ -988,7 +988,7 @@ pub const WebTransportConnection = struct {
     fn rejectCapsuleStream(self: *WebTransportConnection, session: *Session) void {
         if (session.state != .draining) return;
         if (self.quic.streams.getStream(session.session_id)) |s| {
-            s.send.reset(@intFromEnum(h3_conn.H3Error.message_error));
+            s.send.reset(@backingInt(h3_conn.H3Error.message_error));
         }
     }
 
@@ -2264,7 +2264,7 @@ test "WT integration: a CONNECT past the session slots is refused, not counted a
         try testing.expectEqual(@as(?WtEvent, null), try wt.poll());
         try testing.expectEqual(@as(u32, MAX_SESSIONS), wt.active_session_count);
         try testing.expect(wt.getSession(id) == null);
-        const rejected: u64 = @intFromEnum(h3_conn.H3Error.request_rejected);
+        const rejected: u64 = @backingInt(h3_conn.H3Error.request_rejected);
         try testing.expectEqual(@as(?u64, rejected), stream.recv.stop_sending_err);
         try testing.expect(stream.send.reset_err != null);
         try testing.expectEqual(rejected, stream.send.reset_err.?);
@@ -2448,7 +2448,6 @@ test "WT integration: client receives session_rejected on non-200" {
 }
 
 // ---- Group F: Session close ----
-
 
 /// Unwrap a capsule written to a CONNECT stream. Asserts the DATA wrapper is
 /// there: sent bare, the peer ignores the capsule as an unknown H3 frame type.
@@ -2836,7 +2835,7 @@ test "WT integration: a reset code outside the WebTransport range reports 0" {
     const stream = setup.quic_conn.streams.getStream(stream_id).?;
     // An H3-level code, not an application one: there is no app code to report,
     // and the peer still needs to hear the stream died.
-    try stream.recv.handleResetStream(@intFromEnum(h3_conn.H3Error.request_cancelled), 0);
+    try stream.recv.handleResetStream(@backingInt(h3_conn.H3Error.request_cancelled), 0);
 
     const ev = try pollFor(&setup.wt, .stream_reset);
     try testing.expectEqual(@as(u32, 0), ev.stream_reset.error_code);
@@ -2946,7 +2945,7 @@ test "WT: invalid session ID triggers H3_ID_ERROR on bidi stream" {
     // Connection should be closing with H3_ID_ERROR (RFC 9114 §8.1)
     try testing.expect(setup.quic_conn.local_err != null);
     try testing.expect(setup.quic_conn.local_err.?.is_app);
-    try testing.expectEqual(@intFromEnum(h3_conn.H3Error.id_error), setup.quic_conn.local_err.?.code);
+    try testing.expectEqual(@backingInt(h3_conn.H3Error.id_error), setup.quic_conn.local_err.?.code);
 }
 
 test "WT: invalid session ID triggers H3_ID_ERROR on uni stream" {
@@ -2969,7 +2968,7 @@ test "WT: invalid session ID triggers H3_ID_ERROR on uni stream" {
     // Connection should be closing with H3_ID_ERROR (RFC 9114 §8.1)
     try testing.expect(setup.quic_conn.local_err != null);
     try testing.expect(setup.quic_conn.local_err.?.is_app);
-    try testing.expectEqual(@intFromEnum(h3_conn.H3Error.id_error), setup.quic_conn.local_err.?.code);
+    try testing.expectEqual(@backingInt(h3_conn.H3Error.id_error), setup.quic_conn.local_err.?.code);
 }
 
 test "WT: uni stream to unknown session gets BUFFERED_STREAM_REJECTED" {

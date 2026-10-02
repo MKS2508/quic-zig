@@ -1149,7 +1149,7 @@ pub fn Server(comptime Handler: type) type {
             // Still handshaking: initProtocol sends GOAWAY(0) once it can.
             const h3c = entry.h3_conn orelse return;
             h3c.initiateShutdown() catch {
-                conn.close(@intFromEnum(h3.H3Error.no_error), "server shutdown");
+                conn.close(@backingInt(h3.H3Error.no_error), "server shutdown");
                 return;
             };
             entry.drain_final_goaway_at = now + conn.pkt_handler.rtt_stats.pto();
@@ -1173,7 +1173,7 @@ pub fn Server(comptime Handler: type) type {
                 if (now < (entry.drain_final_goaway_at orelse now)) return;
                 entry.drain_final_goaway_at = null;
                 h3c.completeShutdown() catch {
-                    conn.close(@intFromEnum(h3.H3Error.no_error), "server shutdown");
+                    conn.close(@backingInt(h3.H3Error.no_error), "server shutdown");
                     return;
                 };
             }
@@ -1188,7 +1188,7 @@ pub fn Server(comptime Handler: type) type {
                 if (send.hasUnackedData()) return;
                 if (send.reset_err != null and !send.reset_stream_sent) return;
             }
-            conn.close(@intFromEnum(h3.H3Error.no_error), "");
+            conn.close(@backingInt(h3.H3Error.no_error), "");
         }
 
         /// Initiate graceful shutdown. All active connections receive
@@ -1588,7 +1588,7 @@ pub fn Server(comptime Handler: type) type {
             // Finished its handshake after drain() began: it may send nothing.
             if (self.draining) {
                 if (entry.h3_conn) |h3c| {
-                    h3c.sendGoaway(0) catch entry.conn.close(@intFromEnum(h3.H3Error.no_error), "server shutdown");
+                    h3c.sendGoaway(0) catch entry.conn.close(@backingInt(h3.H3Error.no_error), "server shutdown");
                 } else {
                     entry.conn.close(0, "server shutdown");
                 }
@@ -1688,7 +1688,7 @@ pub fn Server(comptime Handler: type) type {
                 self.handler.onRequest(session, stream_id, headers);
             } else {
                 // Nobody will answer it, so say so instead of leaving it open.
-                session.resetRequest(stream_id, @intFromEnum(h3.H3Error.request_rejected));
+                session.resetRequest(stream_id, @backingInt(h3.H3Error.request_rejected));
             }
         }
 
@@ -3938,7 +3938,7 @@ const CheckingClient = struct {
             if (std.mem.eql(u8, h.name, ":status") and h.value.len == 3) @memcpy(&self.status, h.value);
         }
         if (self.cancel_on_headers) {
-            session.h3_conn.?.cancelRequest(stream_id, @intFromEnum(H3Error.request_cancelled));
+            session.h3_conn.?.cancelRequest(stream_id, @backingInt(H3Error.request_cancelled));
         }
     }
 
@@ -4084,7 +4084,7 @@ test "e2e: a client abandoning a response reaches onRequestCancelled" {
 
     try runUntil(&e2e.loop, &server_handler, StallingServer.done, 10_000);
     try testing.expectEqual(client_handler.stream_id, server_handler.cancelled_stream);
-    try testing.expectEqual(@as(u64, @intFromEnum(H3Error.request_cancelled)), server_handler.cancel_code);
+    try testing.expectEqual(@as(u64, @backingInt(H3Error.request_cancelled)), server_handler.cancel_code);
 }
 
 /// A WebTransport listener that also serves plain requests.
@@ -4431,7 +4431,7 @@ test "e2e: drain() lets an in-flight response finish and turns new requests away
     // The final GOAWAY names the first request not served: the next one.
     try testing.expectEqual(@as(?u64, 4), client_handler.goaway_id);
     try testing.expect(client_handler.refused_locally);
-    try testing.expectEqual(@as(?u64, @intFromEnum(H3Error.request_rejected)), client_handler.late_reset_code);
+    try testing.expectEqual(@as(?u64, @backingInt(H3Error.request_rejected)), client_handler.late_reset_code);
     try testing.expectEqual(@as(u32, 1), server_handler.requests);
 }
 

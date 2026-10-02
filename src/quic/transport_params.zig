@@ -119,20 +119,20 @@ pub const TransportParams = struct {
         // Helper to write a single parameter
         const Helper = struct {
             fn writeParam(w: anytype, id: ParamId, value: u64) !void {
-                try packet.writeVarInt(w, @intFromEnum(id));
+                try packet.writeVarInt(w, @backingInt(id));
                 const len = packet.varIntLength(value);
                 try packet.writeVarInt(w, len);
                 try packet.writeVarInt(w, value);
             }
 
             fn writeParamBytes(w: anytype, id: ParamId, data: []const u8) !void {
-                try packet.writeVarInt(w, @intFromEnum(id));
+                try packet.writeVarInt(w, @backingInt(id));
                 try packet.writeVarInt(w, data.len);
                 try w.writeAll(data);
             }
 
             fn writeParamEmpty(w: anytype, id: ParamId) !void {
-                try packet.writeVarInt(w, @intFromEnum(id));
+                try packet.writeVarInt(w, @backingInt(id));
                 try packet.writeVarInt(w, 0);
             }
         };
@@ -146,7 +146,7 @@ pub const TransportParams = struct {
         }
 
         if (self.stateless_reset_token) |token| {
-            try packet.writeVarInt(writer, @intFromEnum(ParamId.stateless_reset_token));
+            try packet.writeVarInt(writer, @backingInt(ParamId.stateless_reset_token));
             try packet.writeVarInt(writer, 16);
             try writer.writeAll(&token);
         }
@@ -192,7 +192,7 @@ pub const TransportParams = struct {
         }
 
         if (self.preferred_address) |pref| {
-            try packet.writeVarInt(writer, @intFromEnum(ParamId.preferred_address));
+            try packet.writeVarInt(writer, @backingInt(ParamId.preferred_address));
             // Length: 4+2 + 16+2 + 1+cid_len + 16 = 41 + cid_len
             const pref_len: u64 = 41 + @as(u64, pref.cid_len);
             try packet.writeVarInt(writer, pref_len);
@@ -244,7 +244,7 @@ pub const TransportParams = struct {
         if (self.version_info_chosen) |chosen| {
             const n = self.version_info_available_count;
             const param_len: u64 = 4 + @as(u64, n) * 4; // chosen(4) + available(n*4)
-            try packet.writeVarInt(writer, @intFromEnum(ParamId.version_information));
+            try packet.writeVarInt(writer, @backingInt(ParamId.version_information));
             try packet.writeVarInt(writer, param_len);
             try writer.writeInt(u32, chosen, .big);
             for (0..n) |i| {
@@ -269,50 +269,50 @@ pub const TransportParams = struct {
             const param_start = fbs.seek;
 
             switch (param_id) {
-                @intFromEnum(ParamId.original_destination_connection_id) => {
+                @backingInt(ParamId.original_destination_connection_id) => {
                     params.original_destination_connection_id = data[fbs.seek..][0..param_len];
                     fbs.seek += param_len;
                 },
-                @intFromEnum(ParamId.max_idle_timeout) => {
+                @backingInt(ParamId.max_idle_timeout) => {
                     params.max_idle_timeout = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.stateless_reset_token) => {
+                @backingInt(ParamId.stateless_reset_token) => {
                     if (param_len != 16) return error.TransportParameterError;
                     var token: [16]u8 = undefined;
                     _ = try reader.readSliceShort(&token);
                     params.stateless_reset_token = token;
                 },
-                @intFromEnum(ParamId.max_udp_payload_size) => {
+                @backingInt(ParamId.max_udp_payload_size) => {
                     params.max_udp_payload_size = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.initial_max_data) => {
+                @backingInt(ParamId.initial_max_data) => {
                     params.initial_max_data = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.initial_max_stream_data_bidi_local) => {
+                @backingInt(ParamId.initial_max_stream_data_bidi_local) => {
                     params.initial_max_stream_data_bidi_local = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.initial_max_stream_data_bidi_remote) => {
+                @backingInt(ParamId.initial_max_stream_data_bidi_remote) => {
                     params.initial_max_stream_data_bidi_remote = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.initial_max_stream_data_uni) => {
+                @backingInt(ParamId.initial_max_stream_data_uni) => {
                     params.initial_max_stream_data_uni = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.initial_max_streams_bidi) => {
+                @backingInt(ParamId.initial_max_streams_bidi) => {
                     params.initial_max_streams_bidi = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.initial_max_streams_uni) => {
+                @backingInt(ParamId.initial_max_streams_uni) => {
                     params.initial_max_streams_uni = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.ack_delay_exponent) => {
+                @backingInt(ParamId.ack_delay_exponent) => {
                     params.ack_delay_exponent = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.max_ack_delay) => {
+                @backingInt(ParamId.max_ack_delay) => {
                     params.max_ack_delay = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.disable_active_migration) => {
+                @backingInt(ParamId.disable_active_migration) => {
                     params.disable_active_migration = true;
                 },
-                @intFromEnum(ParamId.preferred_address) => {
+                @backingInt(ParamId.preferred_address) => {
                     // IPv4 addr (4) + port (2) + IPv6 addr (16) + port (2) + CID len (1) + CID + reset token (16)
                     var pref = PreferredAddress{};
                     _ = try reader.readSliceShort(&pref.ipv4_addr);
@@ -329,24 +329,24 @@ pub const TransportParams = struct {
                     _ = try reader.readSliceShort(&pref.stateless_reset_token);
                     params.preferred_address = pref;
                 },
-                @intFromEnum(ParamId.active_connection_id_limit) => {
+                @backingInt(ParamId.active_connection_id_limit) => {
                     params.active_connection_id_limit = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.initial_source_connection_id) => {
+                @backingInt(ParamId.initial_source_connection_id) => {
                     params.initial_source_connection_id = data[fbs.seek..][0..param_len];
                     fbs.seek += param_len;
                 },
-                @intFromEnum(ParamId.retry_source_connection_id) => {
+                @backingInt(ParamId.retry_source_connection_id) => {
                     params.retry_source_connection_id = data[fbs.seek..][0..param_len];
                     fbs.seek += param_len;
                 },
-                @intFromEnum(ParamId.max_datagram_frame_size) => {
+                @backingInt(ParamId.max_datagram_frame_size) => {
                     params.max_datagram_frame_size = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.min_ack_delay) => {
+                @backingInt(ParamId.min_ack_delay) => {
                     params.min_ack_delay = try packet.readVarInt(reader);
                 },
-                @intFromEnum(ParamId.version_information) => {
+                @backingInt(ParamId.version_information) => {
                     if (param_len < 4 or (param_len % 4) != 0) {
                         fbs.seek = param_start + param_len;
                     } else {

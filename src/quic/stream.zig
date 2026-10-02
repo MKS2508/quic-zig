@@ -19,7 +19,7 @@ pub const StreamType = enum(u2) {
 
 /// Returns the type of a stream from its ID.
 pub fn streamType(stream_id: u64) StreamType {
-    return @enumFromInt(@as(u2, @truncate(stream_id)));
+    return @fromBackingInt(@intCast(@as(u2, @truncate(stream_id))));
 }
 
 /// Returns true if the stream is bidirectional.

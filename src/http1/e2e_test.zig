@@ -421,7 +421,7 @@ const TestClient = struct {
         self.pos += pos + len;
         return .{
             .fin = b[0] & 0x80 != 0,
-            .opcode = @enumFromInt(@as(u4, @truncate(b[0]))),
+            .opcode = @fromBackingInt(@intCast(@as(u4, @truncate(b[0])))),
             .payload = b[pos..][0..len],
         };
     }

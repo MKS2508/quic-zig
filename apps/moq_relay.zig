@@ -504,7 +504,9 @@ const RelayHandler = struct {
 
         const ci = self.findOrCreateClient(session.entry) orelse {
             var live: usize = 0;
-            for (&self.clients) |*c| { if (c.active) live += 1; }
+            for (&self.clients) |*c| {
+                if (c.active) live += 1;
+            }
             std.debug.print("[relay] client table full ({d} active); refusing session\n", .{live});
             session.closeSession(session_id);
             return;

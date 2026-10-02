@@ -62,7 +62,7 @@ const QueuedEvent = struct {
         const out = buf[0..buf_len];
 
         // Fixed header (24 bytes, little-endian)
-        out[0] = @intFromEnum(self.event_type);
+        out[0] = @backingInt(self.event_type);
         out[1] = self.flags;
         std.mem.writeInt(u16, out[2..4], 0, .little); // reserved
         std.mem.writeInt(u32, out[4..8], data_len, .little);

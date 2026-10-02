@@ -806,7 +806,7 @@ pub fn writeRefusal(header: packet.Header, out: []u8) !usize {
     try w.writeByte(0); // token length
 
     // CONNECTION_CLOSE (0x1c), CONNECTION_REFUSED, frame type 0, no reason.
-    const payload = [_]u8{ 0x1c, @intFromEnum(frame_mod.TransportError.connection_refused), 0x00, 0x00 };
+    const payload = [_]u8{ 0x1c, @backingInt(frame_mod.TransportError.connection_refused), 0x00, 0x00 };
     const tag_len = 16;
     const length = pn_len + payload.len + tag_len;
     try packet.writeVarInt(w, length);
@@ -1097,7 +1097,7 @@ test "a server at capacity refuses a new client with CONNECTION_REFUSED" {
     client.conn.handleDatagram(@constCast(reply), .{ .to = addr, .from = addr, .datagram_size = reply.len });
     try std.testing.expect(client.conn.isDraining());
     try std.testing.expectEqual(
-        @as(u64, @intFromEnum(frame_mod.TransportError.connection_refused)),
+        @as(u64, @backingInt(frame_mod.TransportError.connection_refused)),
         client.conn.local_err.?.code,
     );
 }
