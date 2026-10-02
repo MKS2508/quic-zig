@@ -2,15 +2,16 @@
     .name = .quic,
     .version = "0.5.0",
     .dependencies = .{
-        // MKS2508/libxev branch = MKS 0.17 port (c1e223b) + endel's quic-zig-2026-09-26-2
-        // patches (#224 #240 #245 #246 #247) + 0.17 test fixes. See "libxev" in CLAUDE.md.
+        // MKS2508/libxev main (merge de chore/zig-0.17.0) = MKS 0.17 port (c1e223b) + endel's
+        // quic-zig-2026-09-26-2 patches (#224 #240 #245 #246 #247) + 0.17 test fixes, sobre
+        // Zig 0.17.0 estable. See "libxev" in CLAUDE.md.
         .libxev = .{
-            .url = "https://github.com/MKS2508/libxev/archive/f5d38116e122d46264b22bf9f31246280c6ce1e0.tar.gz",
-            .hash = "libxev-0.0.0-86vtc161FACqYeIlWiSoja8g74RJxfzAu0yFD1uaUDsr",
+            .url = "https://github.com/MKS2508/libxev/archive/1b9022307f35ea16c752e0452b8d1bee6c71ff42.tar.gz",
+            .hash = "libxev-0.0.0-86vtc-TVFADsdT_67c1n0RL36r67EsC_atdG8qfKoZgq",
         },
     },
     .fingerprint = 0xc079525234abfc4c,
-    .minimum_zig_version = "0.17.0-dev.1893+78e3b1c73",
+    .minimum_zig_version = "0.17.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
