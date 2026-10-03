@@ -398,7 +398,7 @@ conn.handleDatagram(buf[0..len], recv_info);
 
 ## Building
 
-Requires **Zig 0.16.0**.
+Requires **Zig 0.17.0** or newer (`build.zig` rejects older toolchains at comptime).
 
 ```bash
 zig build
