@@ -13,7 +13,10 @@ what upstream has fixed. Second, it is the material for raising these points
 with the Zig project, which a person does, not an AI agent. See "Upstream
 contributions" in `CLAUDE.md`.
 
-- **Baseline:** Zig 0.16.0, the version this repo builds against.
+- **Builds against:** Zig 0.17.0 (the comptime floor in `build.zig`).
+- **Baseline of the comparisons:** Zig 0.16.0. The sections below compare
+  our code with the 0.16.0 std and with master as of the date each gives;
+  they have not been re-checked against the 0.17.0 release yet.
 - **Master:** each section says what Codeberg `ziglang/zig` master showed on
   24 Sep 2026, or the date it gives.
 - **Benchmark hardware:** arm64 figures are native runs on an Apple M-series
